@@ -37,6 +37,7 @@ jobs:
             --label "org.opencontainers.image.title=Masqueradarr" \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            -f docker/aio.Dockerfile \
             -t ${{ env.IMAGE }}:${{ github.sha }} \
             .
 
