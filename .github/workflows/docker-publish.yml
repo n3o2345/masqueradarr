@@ -65,5 +65,3 @@ jobs:
       - name: Push
         if: github.event_name != 'pull_request'
         run: docker push --all-tags ${{ env.IMAGE }}
-
-          cache-to: type=gha,mode=max
