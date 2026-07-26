@@ -1,296 +1,66 @@
-# Multi-arch (linux/amd64 + linux/arm64) Docker build & push for masqueradarr's two images,
-# porting the manual `/docker-build-all` skill into GitHub Actions.
-#
-# Build strategy: each arch is built NATIVELY on its own runner (amd64 on ubuntu-latest, arm64 on
-# ubuntu-24.04-arm — no QEMU emulation) and pushed BY DIGEST; a `merge` job then stitches the two
-# per-arch manifests into one multi-arch manifest list per image and applies the real tags. BuildKit
-# layers are cached in the GitHub Actions cache (type=gha), scoped per image+arch, so the Rust
-# dependency compile and npm installs are restored across runs instead of rebuilt from scratch.
-#
-#   app image    : docker/app.Dockerfile -> <DOCKERHUB_USERNAME>/masqueradarr
-#   all-in-one   : docker/aio.Dockerfile -> <DOCKERHUB_USERNAME>/masqueradarr-aio
-#
-# Tag rule (case-insensitive):
-#   version "…-latest" (e.g. 0.0.1-latest) -> push :0.0.1 (suffix stripped) + :latest
-#   version "…-dev"    (e.g. 0.0.1-dev)     -> push :0.0.1-dev (full)        + :dev
-#   plain version      (e.g. 2.1.0)         -> push :2.1.0 only
-#   dedupe: if the version literally IS "dev"/"latest", skip the rolling tag.
-# APP_VERSION build-arg is ALWAYS the full input version, so images self-report the release.
-# A GitHub Release (with a deployable bundle) is created ONLY when the version contains "-latest",
-# tagged with the clean version (e.g. 0.0.1).
-
-name: Build & Publish Docker Images
+name: Build and Push to GHCR
 
 on:
+  push:
+    branches: [main, master]
+    tags:     ["v*.*.*"]
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version tag to publish (e.g. 2.1.0, 2.1.0-dev, 2.1.0-latest)"
-        required: true
-        type: string
 
-permissions:
-  contents: read            # least privilege; only the release job elevates
-
-concurrency:
-  group: docker-publish-${{ inputs.version }}
-  cancel-in-progress: false # never kill an in-flight push
+env:
+  IMAGE: ghcr.io/n3o2345/masqueradarr
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.derive.outputs.version }}
-      primary: ${{ steps.derive.outputs.primary }}
-      rolling: ${{ steps.derive.outputs.rolling }}
-      is_release: ${{ steps.derive.outputs.is_release }}
-      release_title: ${{ steps.derive.outputs.release_title }}
-    steps:
-      - name: Validate input & derive tags
-        id: derive
-        run: |
-          version="${{ inputs.version }}"
-          if [ -z "$version" ]; then
-            echo "::error::version input is empty"; exit 1
-          fi
-          case "$version" in
-            *[[:space:]]*) echo "::error::version must not contain whitespace: '$version'"; exit 1 ;;
-          esac
-
-          lc="$(printf '%s' "$version" | tr '[:upper:]' '[:lower:]')"
-
-          # rolling tag (skill order: dev before latest), case-insensitive
-          case "$lc" in
-            *dev*)    rolling=dev ;;
-            *latest*) rolling=latest ;;
-            *)        rolling= ;;
-          esac
-          # dedupe: caller literally passed `dev`/`latest` as the whole version
-          if [ "$rolling" = "$version" ]; then rolling=; fi
-
-          # release gate: ONLY when the version contains "-latest"
-          case "$lc" in
-            *-latest*) is_release=true ;;
-            *)         is_release=false ;;
-          esac
-
-          # human-facing release title: strip -latest/-dev suffix, prepend v
-          clean="$(printf '%s' "$version" | sed -E 's/-(latest|dev)$//I')"
-          release_title="v$clean"
-
-          # primary versioned Docker tag: strip a trailing -latest (0.0.1-latest -> 0.0.1);
-          # keep -dev / plain versions as-is.
-          case "$rolling" in
-            latest) primary="$clean" ;;
-            *)      primary="$version" ;;
-          esac
-
-          {
-            echo "version=$version"
-            echo "primary=$primary"
-            echo "rolling=$rolling"
-            echo "is_release=$is_release"
-            echo "release_title=$release_title"
-          } >> "$GITHUB_OUTPUT"
-          echo "Resolved: version='$version' primary='$primary' rolling='${rolling:-<none>}' is_release=$is_release release_title='$release_title'"
-
-  build:
-    needs: prepare
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { image: app-stack, repo: masqueradarr,     dockerfile: docker/app.Dockerfile, arch: amd64, runner: ubuntu-latest }
-          - { image: app-stack, repo: masqueradarr,     dockerfile: docker/app.Dockerfile, arch: arm64, runner: ubuntu-24.04-arm }
-          - { image: aio,       repo: masqueradarr-aio, dockerfile: docker/aio.Dockerfile, arch: amd64, runner: ubuntu-latest }
-          - { image: aio,       repo: masqueradarr-aio, dockerfile: docker/aio.Dockerfile, arch: arm64, runner: ubuntu-24.04-arm }
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # Native per-arch build (no QEMU). push-by-digest publishes an untagged, arch-specific manifest;
-      # the merge job below assembles the tagged multi-arch list. The gha cache is scoped per image+arch
-      # so the four legs don't clobber each other's layer cache — the Rust `cargo chef cook` layer and
-      # the `npm ci` layers persist across dispatches.
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: linux/${{ matrix.arch }}
-          build-args: |
-            APP_VERSION=${{ needs.prepare.outputs.version }}
-          provenance: false
-          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
-          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.repo }},push-by-digest=true,name-canonical=true,push=true
-
-      # Emit an empty file NAMED for the pushed digest; the merge job globs these into the manifest list.
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-${{ matrix.image }}-${{ matrix.arch }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  # Stitch the per-arch digests into one multi-arch manifest list per image and apply the real tags
-  # (:version + optional rolling :dev/:latest). This is where the actual published, tagged images appear.
-  merge:
-    needs: [prepare, build]
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { image: app-stack, repo: masqueradarr }
-          - { image: aio,       repo: masqueradarr-aio }
-    steps:
-      - name: Download per-arch digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digests-${{ matrix.image }}-*
-          merge-multiple: true
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Compose tag args
-        id: tags
-        run: |
-          ns="${{ secrets.DOCKERHUB_USERNAME }}"
-          repo="${{ matrix.repo }}"
-          primary="${{ needs.prepare.outputs.primary }}"
-          rolling="${{ needs.prepare.outputs.rolling }}"
-          args="-t $ns/$repo:$primary"
-          [ -n "$rolling" ] && args="$args -t $ns/$repo:$rolling"
-          echo "args=$args" >> "$GITHUB_OUTPUT"
-
-      - name: Create & push manifest list
-        working-directory: /tmp/digests
-        run: |
-          # word-splitting is intentional: tag args + one source ref per per-arch digest file.
-          # shellcheck disable=SC2046,SC2086
-          ns="${{ secrets.DOCKERHUB_USERNAME }}"
-          repo="${{ matrix.repo }}"
-          docker buildx imagetools create ${{ steps.tags.outputs.args }} \
-            $(printf "$ns/$repo@sha256:%s " *)
-
-      # Record the manifest-LIST digest for the release notes as a deterministic per-image artifact
-      # (avoids the unstable matrix-job-outputs pattern the old build job relied on).
-      - name: Export manifest digest
-        run: |
-          ns="${{ secrets.DOCKERHUB_USERNAME }}"
-          repo="${{ matrix.repo }}"
-          primary="${{ needs.prepare.outputs.primary }}"
-          mkdir -p /tmp/out
-          docker buildx imagetools inspect "$ns/$repo:$primary" --format '{{.Manifest.Digest}}' > /tmp/out/digest.txt
-
-      - name: Upload manifest digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: manifest-digest-${{ matrix.image }}
-          path: /tmp/out/digest.txt
-          if-no-files-found: error
-          retention-days: 1
-
-  release:
-    needs: [prepare, merge]
-    if: needs.prepare.outputs.is_release == 'true'
+  build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
+      packages: write
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Download manifest digests
-        uses: actions/download-artifact@v4
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
         with:
-          path: /tmp/digests
-          pattern: manifest-digest-*
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.CR_PAT }}
 
-      - name: Read manifest digests
-        id: digests
+      # Build once, tag for everything we need
+      - name: Build image
         run: |
-          echo "app=$(cat /tmp/digests/manifest-digest-app-stack/digest.txt)" >> "$GITHUB_OUTPUT"
-          echo "aio=$(cat /tmp/digests/manifest-digest-aio/digest.txt)" >> "$GITHUB_OUTPUT"
+          docker build \
+            --label "org.opencontainers.image.title=Masqueradarr" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            -t ${{ env.IMAGE }}:${{ github.sha }} \
+            .
 
-      - name: Build deploy bundle
+      # Branch push → :main (or :master) + :latest
+      - name: Tag branch
+        if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/')
         run: |
-          ns="${{ secrets.DOCKERHUB_USERNAME }}"
-          primary="${{ needs.prepare.outputs.primary }}"
-          mkdir -p bundle
-          cp .env.example bundle/.env.example
-          # Point the app service at the just-published image; drop the local build block
-          # so the bundle is pull-only and deployable as-is.
-          IMG="$ns/masqueradarr:$primary" \
-            yq '.services.masqueradarr.image = strenv(IMG) | del(.services.masqueradarr.build)' \
-            docker-compose.yml > bundle/docker-compose.yml
+          BRANCH=${GITHUB_REF_NAME}
+          docker tag ${{ env.IMAGE }}:${{ github.sha }} ${{ env.IMAGE }}:${BRANCH}
+          docker tag ${{ env.IMAGE }}:${{ github.sha }} ${{ env.IMAGE }}:latest
 
-      - name: Compose release notes
+      # Semver tag push (v1.2.3) → :1.2.3 + :1.2 + :1 + :latest
+      - name: Tag semver
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          ns="${{ secrets.DOCKERHUB_USERNAME }}"
-          primary="${{ needs.prepare.outputs.primary }}"
-          rolling="${{ needs.prepare.outputs.rolling }}"
-          release_title="${{ needs.prepare.outputs.release_title }}"
-          tagline="\`$primary\`"; [ -n "$rolling" ] && tagline="$tagline, \`$rolling\`"
-          {
-            echo "## masqueradarr $release_title"
-            echo
-            echo "### [masqueradarr](https://thebinaryninja.github.io/masqueradarr/) : Guides : Explanations : Documentation"
-            echo
-            echo "Multi-arch (linux/amd64, linux/arm64) images on Docker Hub."
-            echo
-            echo "### \`$ns/masqueradarr\` (app + external Mongo)"
-            echo "- DockerHub : [masqueradarr compose](https://hub.docker.com/r/$ns/masqueradarr)"
-            echo "- tags: $tagline"
-            echo "- digest: \`${{ steps.digests.outputs.app }}\`"
-            echo
-            echo "### \`$ns/masqueradarr-aio\` (all-in-one)"
-            echo "- DockerHub : [masqueradarr aio](https://hub.docker.com/r/$ns/masqueradarr-aio)"
-            echo "- tags: $tagline"
-            echo "- digest: \`${{ steps.digests.outputs.aio }}\`"
-            echo
-            echo "**Deploy (compose stack):** download \`docker-compose.yml\` + \`.env.example\` below,"
-            echo "rename \`.env.example\` to \`.env\`, set \`MONGO_ROOT_USER\`/\`MONGO_ROOT_PASS\`, then \`docker compose up -d\`."
-            echo
-            echo "Built from \`${GITHUB_SHA}\` by GitHub Actions."
-          } > release-notes.md
+          VERSION=${GITHUB_REF_NAME#v}          # strip leading v
+          MAJOR=${VERSION%%.*}
+          MINOR=${VERSION%.*}
+          docker tag ${{ env.IMAGE }}:${{ github.sha }} ${{ env.IMAGE }}:${VERSION}
+          docker tag ${{ env.IMAGE }}:${{ github.sha }} ${{ env.IMAGE }}:${MINOR}
+          docker tag ${{ env.IMAGE }}:${{ github.sha }} ${{ env.IMAGE }}:${MAJOR}
+          docker tag ${{ env.IMAGE }}:${{ github.sha }} ${{ env.IMAGE }}:latest
 
-      - name: Create or update GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          primary="${{ needs.prepare.outputs.primary }}"
-          release_title="${{ needs.prepare.outputs.release_title }}"
-          if gh release view "$primary" >/dev/null 2>&1; then
-            gh release edit "$primary" --title "$release_title" --notes-file release-notes.md
-            gh release upload "$primary" bundle/docker-compose.yml bundle/.env.example --clobber
-          else
-            gh release create "$primary" --target "$GITHUB_SHA" --title "$release_title" \
-              --notes-file release-notes.md \
-              bundle/docker-compose.yml bundle/.env.example
-          fi
+      # Push all local tags for this image in one shot
+      - name: Push
+        if: github.event_name != 'pull_request'
+        run: docker push --all-tags ${{ env.IMAGE }}
