@@ -125,6 +125,7 @@ const philoAdapter: SourceAdapter = {
         return false;
       }
     },
+    allowPrivate: true, // the actual private-IP gate — philo-proxy is the operator's own LAN/compose box
     onPlaylistChildHost: null, // philo-proxy serves segments from the same configured host — nothing to learn
     relabelSegmentContentType(_url: string, contentType: string) {
       return contentType || 'video/mp2t';

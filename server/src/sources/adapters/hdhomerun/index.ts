@@ -53,6 +53,7 @@ const hdhomerunAdapter: SourceAdapter = {
         return false;
       }
     },
+    allowPrivate: true, // the actual private-IP gate — a tuner is always a LAN device (isAllowedUpstream above only checks protocol)
     onPlaylistChildHost: null, // raw MPEG-TS has no manifest children to learn
     relabelSegmentContentType(_url: string, contentType: string) {
       return contentType || 'video/mp2t';

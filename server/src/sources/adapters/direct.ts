@@ -64,6 +64,7 @@ const directAdapter: SourceAdapter = {
         return false;
       }
     },
+    allowPrivate: true, // the actual private-IP gate (isAllowedUpstream above only checks protocol/host)
     onPlaylistChildHost: null, // host-class gate (not an allowlist) — nothing to learn at runtime
     relabelSegmentContentType(_url: string, contentType: string) {
       return contentType || 'application/octet-stream'; // trust the upstream type (no disguised segments)

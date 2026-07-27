@@ -61,6 +61,16 @@ export interface SourceProxy {
   upstreamHeaders(url: string): Record<string, string>;
   /** SSRF gate for direct hops (dulo: *.dulo.tv; dlhd: dynamic Set; direct/import: any http(s), private IPs allowed for LAN sources). */
   isAllowedUpstream(url: string): boolean;
+  /**
+   * Whether the Rust sidecar's SSRF guard may resolve/fetch a private, loopback, or link-local upstream IP
+   * for this source at all — the ACTUAL gate for LAN sources, separate from isAllowedUpstream's host check
+   * above. Optional; omitted/false is correct for every public-CDN source (dulo/dlhd/pluto/xumo/…), which
+   * keep the private-IP block regardless of what isAllowedUpstream would otherwise pass. Set true ONLY for
+   * genuine LAN sources (direct, hdhomerun, philo) — an operator-curated import/proxy expected to reach a
+   * device on the LAN (192.168.x.x/10.x.x.x). See proxy/resolveSeam.ts buildGrant, which reads this into the
+   * per-stream grant's `allowPrivate` (previously hardcoded false for every source — a real gap this closes).
+   */
+  allowPrivate?: boolean;
   /** Per-rewritten-child hook (dlhd: dynamic-allow each host; dulo/common: null). */
   onPlaylistChildHost: ((host: string) => void) | null;
   /** dulo/common: pass-through; dlhd: relabel disguised image/pdf TS as video/mp2t. */

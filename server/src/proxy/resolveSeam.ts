@@ -153,14 +153,14 @@ export async function buildGrant(
   // attribution is stale the moment this grant is built (a later failed fetch re-sets it via attempt 1).
   if (attempt === 0) noteFailoverServing(source, url, null);
 
-  // P1 sources (dulo/dlhd/dami) are all public-CDN + private-IP-rejecting. A future LAN adapter (hdhomerun/
-  // local) will need a per-adapter signal here to allow private targets; hardcoded false is correct for now.
+  // Per-adapter signal (SourceProxy.allowPrivate) — true only for genuine LAN sources (direct/hdhomerun/
+  // philo); every public-CDN source (dulo/dlhd/dami/pluto/…) omits it and keeps the private-IP block.
   return {
     ok: true,
     target,
     upstreamHeaders,
     relabelSegment,
-    allowPrivate: false,
+    allowPrivate: adapter.proxy.allowPrivate ?? false,
     isEntry,
     proxyConfig,
     policySource: source,
@@ -284,7 +284,7 @@ async function buildFailoverGrant(
     target,
     upstreamHeaders,
     relabelSegment,
-    allowPrivate: false,
+    allowPrivate: candAdapter.proxy.allowPrivate ?? false,
     isEntry,
     proxyConfig,
     policySource: candSource,
