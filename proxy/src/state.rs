@@ -81,6 +81,9 @@ pub struct AppState {
     /// EDGE-3: the per-(token, source) stream-gate decision cache (see AUTH_TTL). Only consulted on the public
     /// edge path (edge.rs); the loopback sidecar path is gated by Node's Express streamGate as before.
     auth_cache: Arc<Mutex<HashMap<(String, String), AuthDecision>>>,
+    /// TSH: the HDHomeRun tuner-sharing registry — concurrent viewers of the same channel fan out from one
+    /// upstream connection instead of each opening their own tuner. See tuner_share.rs.
+    pub tuner_share: Arc<crate::tuner_share::TunerShare>,
 }
 
 /// A cached resolved ENTRY target + the stream's FAILOVER CURSOR. `attempt` pins which candidate the
@@ -311,6 +314,7 @@ impl AppState {
             telemetry_tx,
             stream_seq: Arc::new(AtomicU64::new(0)),
             auth_cache: Arc::new(Mutex::new(HashMap::new())),
+            tuner_share: Arc::new(crate::tuner_share::TunerShare::new()),
         }
     }
 

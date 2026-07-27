@@ -23,6 +23,7 @@ mod proxy;
 mod state;
 mod stream;
 mod tsmux;
+mod tuner_share;
 
 use axum::{
     routing::{get, post},

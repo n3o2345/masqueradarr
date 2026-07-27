@@ -23,7 +23,7 @@ use url::Url;
 use crate::log;
 use crate::manifest::{enc, rewrite_manifest, RewriteResult};
 use crate::state::{AppState, ResolveErr, SourcePolicy, MAX_FAILOVER_ATTEMPTS};
-use crate::stream::{raw_socket_body, segment_body, SocketTelemetryCtx, TelemetryCtx};
+use crate::stream::{segment_body, TelemetryCtx};
 
 // RSL-3 upstream retry. A transient failure (transport error, or a 502/503/504 gateway status) is retried with
 // bounded backoff before the request is failed; a definitive response (2xx, 4xx, or a non-gateway 5xx) is used
@@ -233,6 +233,25 @@ pub async fn serve_stream(
             }
         }
     };
+
+    // TSH: HDHomeRun tuner sharing. If this channel already has a live shared upstream (another viewer is
+    // already watching it), join it now and return — no fetch happens below, so no new tuner is opened.
+    // Scoped to ENTRY requests only: hdhomerun is a raw-TS passthrough with no manifest/hop concept.
+    if !is_hop && source == "hdhomerun" {
+        let join_ctx = TelemetryCtx {
+            state: state.clone(),
+            source: source.to_string(),
+            entry: stream_entry.clone(),
+            rid: rid.clone(),
+            ip: ip.clone(),
+            ua: ua.clone(),
+            username: username.clone(),
+        };
+        let key = crate::tuner_share::share_key(source, &stream_entry);
+        if let Some(resp) = state.tuner_share.join(&key, join_ctx).await {
+            return resp;
+        }
+    }
 
     // SSRF gate on direct hops only (the entry's target is trusted resolve output).
     if is_hop && !ssrf_ok(&policy, &fetch_url) {
@@ -519,34 +538,6 @@ pub async fn serve_stream(
         log::trace("proxy", &rid, || format!("HEAD segment → 200 {out_ct} (no body)"));
         return raw(200, &out_ct, Vec::new());
     }
-
-    // An ENTRY that resolved straight to non-manifest media (no HLS to poll at all — e.g. an HDHomeRun
-    // tuner's raw MPEG-TS, or any other adapter's raw passthrough) is a CONTINUOUS stream, not a one-shot
-    // segment: it can hold this same pipe open for the whole viewing session. The generic segment_body
-    // model only reports egress once at `finish`, which — for a pipe that might not finish for hours —
-    // means the channel never shows as an Active Stream while it's actually playing, and its egress never
-    // "flows out" until the viewer disconnects. A HOP is still a genuine short segment fetch (its polling
-    // HLS entry is the heartbeat), so it keeps the existing segment_body path unchanged.
-    if !is_hop {
-        log::trace("proxy", &rid, || format!("streaming raw-passthrough entry as {out_ct} from {}", host_of(&fetch_url)));
-        let ctx = SocketTelemetryCtx {
-            state: state.clone(),
-            source: source.to_string(),
-            entry: stream_entry.clone(),
-            rid: rid.clone(),
-            ip,
-            ua,
-            username,
-            player_type: player.to_string(),
-        };
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", out_ct)
-            .header("cache-control", "no-store")
-            .body(raw_socket_body(resp, ctx, read_timeout_ms, buffer_size_kb))
-            .unwrap();
-    }
-
     log::trace("proxy", &rid, || format!("streaming segment as {out_ct} from {}", host_of(&fetch_url)));
     let ctx = TelemetryCtx {
         state: state.clone(),
@@ -557,6 +548,13 @@ pub async fn serve_stream(
         ua,
         username,
     };
+    // TSH: this fetch just opened a tuner connection. Register it as the shared upstream for this channel
+    // (or join a winner from a cold-start race — see tuner_share::start) so any other current/future viewer
+    // of the same channel reuses it instead of opening a second tuner.
+    if source == "hdhomerun" && !is_hop {
+        let key = crate::tuner_share::share_key(source, &stream_entry);
+        return state.tuner_share.clone().start(key, resp, out_ct, ctx).await;
+    }
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", out_ct)

@@ -26,7 +26,9 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 # Stream adapters: ReceiverStream (drain a bounded mpsc buffer into an axum Body) + StreamExt::next (drive
 # reqwest's bytes_stream in the RSL segment pump / DST TS concat). Already in the tree via tokio/reqwest.
-tokio-stream = "0.1"
+# TSH: "sync" additionally gates BroadcastStream (tuner_share's shared-viewer fan-out) — ReceiverStream
+# (the RSL segment pump) needs no feature flag, but BroadcastStream does.
+tokio-stream = { version = "0.1", features = ["sync"] }
 # HTTP client for upstream fetches + the Node resolve-seam / telemetry calls. rustls (not native-tls) so the
 # binary has no system OpenSSL dependency; `stream` gives bytes_stream() for zero-copy segment piping.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "http2", "json"] }
