@@ -46,6 +46,7 @@ import { startProxySidecar, stopProxySidecar, EDGE } from './proxy/sidecar.js';
 import { internalRouter } from './routes/internal.js';
 import { streamGate } from './middleware/streamGate.js';
 import { proxyRelay } from './proxy/relay.js';
+import { hdhomerunEmulationRouter } from './routes/hdhomerunEmulation.js';
 
 // Same-origin gate for the dulo login-stream WebSocket. Compares HOSTNAMES (ignoring port) so the Vite dev
 // proxy (localhost:5173 → localhost:3000) and the co-served prod SPA both pass, while a cross-site page is
@@ -233,6 +234,13 @@ async function main() {
   // Generic source API (manifest, status, sync/reset, provisioning, dulo auth) — mounted at root since its
   // paths span /api/sources.
   app.use(sourcesRouter);
+
+  // HDHomeRun tuner EMULATION (Plex/Emby/Jellyfin/Channels DVR "add a Live TV source"). Root-mounted like
+  // sourcesRouter. Its paths are /hdhr/... (not /api/...), so `app.use('/api', authenticate)` above never
+  // matches it regardless of registration order — same token-free-URL model as the per-user Global .m3u
+  // files below: the /hdhr/<slug>/ path segment is the unguessable bearer, not a session. See
+  // routes/hdhomerunEmulation.ts for the full design note.
+  app.use(hdhomerunEmulationRouter);
 
   // composeDir holds the m3u exports (decoupled from the SPA's publicDir). Files are PER-USER ONLY
   // (<username>-<slug>.m3u) under _global/m3u/ (Global) and custom/<customPath>/ (Custom), plus the EPG
