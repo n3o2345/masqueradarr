@@ -311,6 +311,7 @@ function buildEpgChannel(c: XmltvChannel, sourceId: string): EpgChannelDoc {
     channelId: c.id,
     channelNo: null,
     source: sourceId,
+    icon: c.icon || null,
   };
 }
 

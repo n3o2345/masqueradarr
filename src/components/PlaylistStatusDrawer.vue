@@ -325,6 +325,15 @@ function setApplyTags(v: boolean) {
   if (v) emit('channelsTagged');
 }
 
+// "Use EPG channel logo" — when on, an exported channel that's matched to a guide (tvg_id + epg both set)
+// shows that guide channel's own logo instead of this channel's stream logo. The server recomposes the
+// exports on toggle so the swap is visible immediately.
+const useEpgLogo = ref(!!props.playlist.useEpgLogo);
+function setUseEpgLogo(v: boolean) {
+  useEpgLogo.value = v;
+  save({ useEpgLogo: v });
+}
+
 function setMode(m: 'global' | 'custom') {
   mode.value = m;
   save({ endpoint: m, url: hostedUrl.value });
@@ -462,6 +471,23 @@ function onCustomPath(v: string) {
               </div>
             </div>
             <Toggle :on="applyTags" @change="setApplyTags" />
+          </div>
+        </div>
+
+        <div class="divider" />
+
+        <!-- Use the matched EPG guide's channel logo instead of this playlist's own stream logo. -->
+        <div class="form-row">
+          <div class="row" style="align-items: center; gap: 10px;">
+            <div style="flex: 1;">
+              <div class="field-lbl" style="margin: 0;">Use EPG channel logo</div>
+              <div class="muted" style="font-size: var(--fs-xs); margin-top: 2px;">
+                {{ useEpgLogo
+                  ? 'Channels matched to an EPG guide show that guide\u2019s logo instead of their own.'
+                  : 'Channels show their own stream logo. Turn on to prefer the matched guide\u2019s logo.' }}
+              </div>
+            </div>
+            <Toggle :on="useEpgLogo" @change="setUseEpgLogo" />
           </div>
         </div>
 

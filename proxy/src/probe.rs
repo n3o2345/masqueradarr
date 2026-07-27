@@ -22,7 +22,7 @@ use tokio::task::JoinSet;
 
 use crate::log;
 use crate::manifest::extract_media;
-use crate::proxy::{check_secret, host_of, text};
+use crate::proxy::{check_secret, host_of, sniff_m3u8, text};
 use crate::state::AppState;
 
 // Node already caps its resolve fan-out and batches per playlist; this bounds the actual upstream fetches so a
@@ -31,6 +31,11 @@ const PROBE_CONCURRENCY: usize = 8;
 // A probe must not hang on a half-open upstream — bound each fetch (the streaming proxy client has NO total
 // timeout, so this is set per-request here).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+// Cap on how much of the body we actually read. A manifest is at most a few KB, so this comfortably holds one
+// whole playlist; a raw, continuous media stream (HDHomeRun's MPEG-TS, `direct`/`philo` LAN sources) has NO
+// end, so it must NEVER be read to completion — that previously hung the probe until PROBE_TIMEOUT and got
+// misreported as DOWN even though the channel was live and playable.
+const PROBE_BODY_CAP: usize = 64 * 1024;
 
 #[derive(Deserialize)]
 pub struct ProbeItem {
@@ -108,7 +113,7 @@ async fn probe_one(state: &AppState, item: ProbeItem) -> ProbeResult {
     }
 
     log::trace("probe", "", || format!("probe {} → {}", item.id, host_of(&item.target)));
-    let resp = match state.client.get(&item.target).headers(hm).timeout(PROBE_TIMEOUT).send().await {
+    let mut resp = match state.client.get(&item.target).headers(hm).timeout(PROBE_TIMEOUT).send().await {
         Ok(r) => r,
         Err(_) => {
             log::trace("probe", "", || format!("probe {} DOWN (connect/resolve failed)", item.id));
@@ -127,16 +132,37 @@ async fn probe_one(state: &AppState, item: ProbeItem) -> ProbeResult {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let body = match resp.text().await {
-        Ok(t) => t,
-        Err(_) => return dead(item.id),
-    };
+
+    // Read only a bounded PREFIX of the body — never the whole thing. A manifest fits comfortably inside the
+    // cap and is fully captured; a raw continuous stream (no #EXT-X-ENDLIST, no EOF — e.g. an HDHomeRun tuner's
+    // MPEG-TS or any other LAN passthrough) gets a small chunk and then the connection is dropped, instead of
+    // hanging until PROBE_TIMEOUT and being misreported as down.
+    let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+    loop {
+        if buf.len() >= PROBE_BODY_CAP {
+            break; // enough to sniff/parse a manifest — stop pulling more of a live stream
+        }
+        match resp.chunk().await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            Ok(None) => break, // upstream actually ended (e.g. a real manifest response) — done
+            Err(_) => {
+                // A read error this early (before we even got a manifest's worth of bytes) means the fetch
+                // itself failed, not just "we stopped early" — treat as down like the pre-existing behavior.
+                if buf.is_empty() {
+                    return dead(item.id);
+                }
+                break;
+            }
+        }
+    }
+    let body = String::from_utf8_lossy(&buf).into_owned();
 
     // A live HLS channel resolves to a parseable manifest. A 2xx manifest ⇒ live + extract decode; a 2xx that
-    // is NOT a manifest (a direct media/segment endpoint) still counts as live but carries no decode metadata.
+    // is NOT a manifest (a direct media/segment endpoint, or a raw continuous stream like HDHomeRun) still
+    // counts as live but carries no decode metadata.
     let is_manifest = ct.contains("mpegurl")
         || final_url.path().to_ascii_lowercase().ends_with(".m3u8")
-        || body.trim_start().starts_with("#EXTM3U");
+        || sniff_m3u8(&buf);
     if !is_manifest {
         return ProbeResult {
             id: item.id,

@@ -51,6 +51,10 @@ export interface Playlist {
   // When true, this playlist's `tags` are cascaded (additively) onto every one of its channels — pushed now
   // and re-pushed whenever the tags change. Set via PUT /api/playlists/:id { applyTagsToChannels }.
   applyTagsToChannels?: boolean;
+  // When true, an exported channel matched to an EPG guide (tvg_id + epg both set) uses that guide channel's
+  // own logo instead of the channel's own logoUrl, wherever the guide has one. Set via PUT /api/playlists/:id
+  // { useEpgLogo }. Absent on legacy rows (treat undefined as false).
+  useEpgLogo?: boolean;
 }
 export interface EpgSource {
   id: string; name: string; url: string; channels: number; programs: number;

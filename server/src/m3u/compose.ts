@@ -18,6 +18,7 @@ import type { HydratedDocument } from 'mongoose';
 import { logger } from '../sources/core/logger.js';
 import { Playlist } from '../models/Playlist.js';
 import { PlaylistChannel, type PlaylistChannelDoc } from '../models/PlaylistChannel.js';
+import { EpgChannel } from '../models/EpgChannel.js';
 import { Settings, SETTINGS_ID } from '../models/Settings.js';
 import { User, type UserDoc } from '../models/User.js';
 import { generateSlug } from '../security/crypto.js';
@@ -46,6 +47,7 @@ interface PlaylistLite {
   endpoint?: string;
   state?: boolean;
   source?: string | null;
+  useEpgLogo?: boolean;
 }
 
 // Registry order index for the cross-source Global union (then group → tvg_name within each source).
@@ -92,21 +94,51 @@ async function playlistActiveChannels(playlist: PlaylistLite): Promise<PlaylistC
 // a custom-type playlist ('clone'/'file'/'url'/'hdhomerun', or legacy 'import') stores its channel COPIES under its own id; every
 // other playlist's channels are keyed by its own `source`. This is the only custom-awareness the compose core needs.
 
+// Resolve, for the channels whose OWNING playlist has useEpgLogo:true, the icon of the EPG guide channel
+// they're matched to (tvg_id + epg both set) — one lookup covering every source in the batch. `useEpgLogoFor`
+// decides per-channel (Global mixes several playlists, each with its own flag; Custom has just one). A
+// channel with no match — unlinked, or linked but the guide has no icon for it — is simply absent from the
+// returned map, so channelToExtinf falls back to that channel's own logoUrl (never a fabricated override).
+async function buildLogoOverrides(
+  channels: PlaylistChannelDoc[],
+  useEpgLogoFor: (ch: PlaylistChannelDoc) => boolean,
+): Promise<Map<string, string | null>> {
+  const overrides = new Map<string, string | null>();
+  const keys = new Set<string>();
+  for (const ch of channels) {
+    if (useEpgLogoFor(ch) && ch.tvg_id != null && ch.epg != null) keys.add(`${ch.epg}:${ch.tvg_id}`);
+  }
+  if (!keys.size) return overrides;
+  const docs = await EpgChannel.find({ _id: { $in: [...keys] } }, { icon: 1 }).lean<
+    Array<{ _id: string; icon?: string | null }>
+  >();
+  const iconById = new Map(docs.map((d) => [d._id, d.icon ?? null]));
+  for (const ch of channels) {
+    if (!useEpgLogoFor(ch) || ch.tvg_id == null || ch.epg == null) continue;
+    const key = `${ch.epg}:${ch.tvg_id}`;
+    if (iconById.has(key)) overrides.set(ch.id, iconById.get(key) ?? null);
+  }
+  return overrides;
+}
+
 // Serialize channels into a stream-ready EXTM3U body: LF only, single trailing '\n', UTF-8 (Node writes
 // no BOM). Returns the included channel count (entries the serializer accepted). `token` (a user's
 // streamToken) is baked into every channel URL — every per-user write passes one (the file downloads
 // token-free, but its channel STREAMS need the token at the proxy gate). `guideUrl` (the absolute URL of
 // this surface's XMLTV guide sibling) becomes the header's x-tvg-url= so a player auto-discovers the guide.
+// `logoOverrides` (from buildLogoOverrides, keyed by PlaylistChannelDoc.id) swaps in a matched EPG guide's
+// icon for the sources that opted in; absent for a channel → its own logoUrl is used, unchanged.
 function serialize(
   channels: PlaylistChannelDoc[],
   domain: string,
   token?: string,
   guideUrl?: string,
+  logoOverrides?: Map<string, string | null>,
 ): { body: string; count: number } {
   const lines = [m3uHeader(guideUrl ?? null)];
   let count = 0;
   for (const ch of channels) {
-    const entry = channelToExtinf(ch, domain, token);
+    const entry = channelToExtinf(ch, domain, token, logoOverrides?.get(ch.id));
     if (entry) {
       lines.push(entry);
       count++;
@@ -202,6 +234,7 @@ async function writeUserGlobalFile(
   gplaylists: Array<{ id: string; source: string }>,
   bySource: Map<string, PlaylistChannelDoc[]>,
   domain: string,
+  logoOverrides?: Map<string, string | null>,
 ): Promise<void> {
   const slug = await ensureSlug(user);
   const file = globalUserM3uPath(user.username, slug);
@@ -213,7 +246,7 @@ async function writeUserGlobalFile(
     user.role === 'admin' ? gplaylists : gplaylists.filter((p) => (user.allowedPlaylists ?? []).includes(p.id));
   const channels: PlaylistChannelDoc[] = [];
   for (const p of visible) channels.push(...(bySource.get(p.source) ?? []));
-  const { body } = serialize(channels, domain, user.streamToken, `${domain}${GLOBAL_GUIDE_PATH}`);
+  const { body } = serialize(channels, domain, user.streamToken, `${domain}${GLOBAL_GUIDE_PATH}`, logoOverrides);
   await withPathLock(file, () => atomicWrite(file, body));
 }
 
@@ -223,6 +256,7 @@ async function writeUserCustomFile(
   target: PlaylistLite,
   channels: PlaylistChannelDoc[],
   domain: string,
+  logoOverrides?: Map<string, string | null>,
 ): Promise<void> {
   const slug = await ensureSlug(user);
   const file = customUserM3uPath(target.url, user.username, slug);
@@ -234,7 +268,13 @@ async function writeUserCustomFile(
     await withPathLock(file, () => pruneFile(file));
     return;
   }
-  const { body } = serialize(channels, domain, user.streamToken, `${domain}${customGuidePath(target.url)}`);
+  const { body } = serialize(
+    channels,
+    domain,
+    user.streamToken,
+    `${domain}${customGuidePath(target.url)}`,
+    logoOverrides,
+  );
   await withPathLock(file, () => atomicWrite(file, body));
 }
 
@@ -243,8 +283,9 @@ async function composeGlobalPerUser(
   gplaylists: Array<{ id: string; source: string }>,
   bySource: Map<string, PlaylistChannelDoc[]>,
   domain: string,
+  logoOverrides?: Map<string, string | null>,
 ): Promise<void> {
-  for (const user of await User.find({})) await writeUserGlobalFile(user, gplaylists, bySource, domain);
+  for (const user of await User.find({})) await writeUserGlobalFile(user, gplaylists, bySource, domain, logoOverrides);
 }
 
 // Fan out one Custom playlist's file to every user — the Custom compose's only on-disk output.
@@ -252,8 +293,9 @@ async function composeCustomPerUser(
   target: PlaylistLite,
   channels: PlaylistChannelDoc[],
   domain: string,
+  logoOverrides?: Map<string, string | null>,
 ): Promise<void> {
-  for (const user of await User.find({})) await writeUserCustomFile(user, target, channels, domain);
+  for (const user of await User.find({})) await writeUserCustomFile(user, target, channels, domain, logoOverrides);
 }
 
 // Prune every user's per-user file for a Custom url (e.g. the playlist was paused/deleted/renamed).
@@ -273,18 +315,24 @@ export async function composeUserFiles(user: UserHydrated): Promise<void> {
 
   const gplaylists = (await Playlist.find(
     { endpoint: 'global', state: true, source: { $ne: null } },
-    { id: 1, source: 1 },
-  ).lean()) as Array<{ id: string; source: string }>;
+    { id: 1, source: 1, useEpgLogo: 1 },
+  ).lean()) as Array<{ id: string; source: string; useEpgLogo?: boolean }>;
   gplaylists.sort((a, b) => (sourceOrder.get(a.source) ?? 999) - (sourceOrder.get(b.source) ?? 999));
+  const useEpgLogoBySource = new Map(gplaylists.map((p) => [p.source, p.useEpgLogo === true]));
   const bySource = new Map<string, PlaylistChannelDoc[]>();
   for (const p of gplaylists) if (!bySource.has(p.source)) bySource.set(p.source, await activeChannels(p.source));
-  await writeUserGlobalFile(user, gplaylists, bySource, domain);
+  const globalOverrides = await buildLogoOverrides(
+    [...bySource.values()].flat(),
+    (ch) => useEpgLogoBySource.get(ch.source) ?? false,
+  );
+  await writeUserGlobalFile(user, gplaylists, bySource, domain, globalOverrides);
 
   const cplaylists = (await Playlist.find({ endpoint: 'custom' }, { _id: 0 }).lean()) as PlaylistLite[];
   for (const c of cplaylists) {
     // Two-level gate: an Inactive Custom playlist yields [] (playlist-level), else its Active channels.
     const channels = await playlistActiveChannels(c);
-    await writeUserCustomFile(user, c, channels, domain);
+    const overrides = c.useEpgLogo ? await buildLogoOverrides(channels, () => true) : undefined;
+    await writeUserCustomFile(user, c, channels, domain, overrides);
   }
 }
 
@@ -323,9 +371,10 @@ export async function composeGlobal(): Promise<ComposeResult> {
   const domain = await resolveDomain();
   const playlists = (await Playlist.find(
     { endpoint: 'global', state: true, source: { $ne: null } },
-    { id: 1, source: 1 },
-  ).lean()) as Array<{ id: string; source: string }>;
+    { id: 1, source: 1, useEpgLogo: 1 },
+  ).lean()) as Array<{ id: string; source: string; useEpgLogo?: boolean }>;
   playlists.sort((a, b) => (sourceOrder.get(a.source) ?? 999) - (sourceOrder.get(b.source) ?? 999));
+  const useEpgLogoBySource = new Map(playlists.map((p) => [p.source, p.useEpgLogo === true]));
 
   // Cache each source's Active channels once — reused by the shared guide and every per-user file.
   const bySource = new Map<string, PlaylistChannelDoc[]>();
@@ -339,8 +388,11 @@ export async function composeGlobal(): Promise<ComposeResult> {
   // x-tvg-url. xmltv owns GLOBAL_GUIDE_PATH; KEPT at its current signature (next-wave URL scheme TBD).
   await composeGuideSafe(all, GLOBAL_GUIDE_PATH);
 
+  // Resolve each opted-in source's matched-EPG-channel icons ONCE for the whole union.
+  const overrides = await buildLogoOverrides(all, (ch) => useEpgLogoBySource.get(ch.source) ?? false);
+
   // The per-user files (<username>-<slug>.m3u), token-baked + scoped. Each user without access is pruned.
-  await composeGlobalPerUser(playlists, bySource, domain);
+  await composeGlobalPerUser(playlists, bySource, domain, overrides);
   return { endpoint: 'global', path: resolve(composeDir, '_global', 'm3u'), channelCount: all.length, bytes: 0 };
 }
 
@@ -361,7 +413,8 @@ async function composeCustom(target: PlaylistLite, domain: string): Promise<Comp
   const channels = await playlistActiveChannels(target);
   // xmltv owns customGuidePath; KEPT at its current signature (next-wave URL scheme TBD). Best-effort.
   await composeGuideSafe(channels, guideServed);
-  await composeCustomPerUser(target, channels, domain);
+  const overrides = target.useEpgLogo ? await buildLogoOverrides(channels, () => true) : undefined;
+  await composeCustomPerUser(target, channels, domain, overrides);
   return { endpoint: 'custom', path: dir, channelCount: channels.length, bytes: 0 };
 }
 

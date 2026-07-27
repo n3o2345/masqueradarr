@@ -92,6 +92,12 @@ const PlaylistSchema = new Schema(
     // on each PUT /api/playlists/:id that changes `tags` or this flag. User-owned — a sync never writes it.
     // See routes/playlists.ts. Turning it OFF stops future propagation but leaves channel tags intact.
     applyTagsToChannels: { type: Boolean, default: false },
+    // When true, an exported channel that is matched to an EPG guide (tvg_id + epg both set) uses that guide
+    // channel's OWN logo (epgchannels.icon) instead of the channel's own logoUrl, wherever the guide has one —
+    // handy when the upstream stream's logo is missing/stale but a matched guide (e.g. a self-hosted XMLTV
+    // source) carries a better one. Falls back to logoUrl when the guide has no icon for that channel. User-owned
+    // — a sync never writes it. See m3u/compose.ts buildLogoOverrides + m3u/serialize.ts channelToExtinf.
+    useEpgLogo: { type: Boolean, default: false },
   },
   { versionKey: false },
 );

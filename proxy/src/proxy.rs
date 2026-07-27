@@ -756,7 +756,7 @@ fn is_manifest(final_url: &Url, orig: &str, ct: &str) -> bool {
 /// first line of every Master/Media Playlist? Tolerates a leading UTF-8 BOM and ASCII whitespace. A raw AES-128
 /// key (or any other binary a CDN mislabels as application/vnd.apple.mpegurl) never matches, so the caller can
 /// serve it verbatim instead of lossily "rewriting" it as a playlist.
-fn sniff_m3u8(bytes: &[u8]) -> bool {
+pub(crate) fn sniff_m3u8(bytes: &[u8]) -> bool {
     let b = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes); // optional UTF-8 BOM
     let start = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
     b[start..].starts_with(b"#EXTM3U")

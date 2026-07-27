@@ -14,6 +14,10 @@ export interface EpgChannelDoc {
   channelId: string;           // the upstream channel id (string)
   channelNo: string | null;
   source: string;              // owning EPG source id
+  icon?: string | null;        // the guide's own channel logo (XMLTV <icon src="">), when the upstream carries one.
+  //                              Explicit null when the source has no equivalent field — never fabricated. Consumed
+  //                              by m3u/compose.ts when a Playlist has useEpgLogo:true (Settings → per-source
+  //                              "Use EPG channel logo" toggle) to override a matched channel's own logoUrl.
 }
 
 const EpgChannelSchema = new Schema<EpgChannelDoc>(
@@ -24,6 +28,7 @@ const EpgChannelSchema = new Schema<EpgChannelDoc>(
     channelId: { type: String, required: true },
     channelNo: { type: String, default: null },
     source: { type: String, required: true },
+    icon: { type: String, default: null },
   },
   { versionKey: false },
 );

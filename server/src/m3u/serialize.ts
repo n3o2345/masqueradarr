@@ -37,7 +37,16 @@ export function channelPlayUrl(ch: PlaylistChannelDoc, domain: string, token?: s
 
 // One channel → its 2-line "#EXTINF:-1 …,<name>\n<url>" entry, or null when the channel can't be composed
 // (not Active, or no stream entry). `domain` is the absolute origin used to build the derived proxy URL.
-export function channelToExtinf(ch: PlaylistChannelDoc, domain: string, token?: string): string | null {
+// `logoOverride` (from compose.ts's buildLogoOverrides, when the owning Playlist has useEpgLogo:true and this
+// channel is matched to an EPG guide) REPLACES ch.logoUrl when passed: undefined = no override (use ch.logoUrl,
+// the default/back-compat behavior); a string or null = use it verbatim (null omits tvg-logo entirely, matching
+// a guide channel with no icon of its own).
+export function channelToExtinf(
+  ch: PlaylistChannelDoc,
+  domain: string,
+  token?: string,
+  logoOverride?: string | null,
+): string | null {
   // §5 inclusion governor — only Active, non-failover-child channels (callers already filter; this is
   // defensive). A failover child is a hidden backup served through its parent's line — never exported.
   // Undefined-safe: pre-feature docs lack failoverRole entirely.
@@ -58,7 +67,8 @@ export function channelToExtinf(ch: PlaylistChannelDoc, domain: string, token?: 
   if (ch.tvg_id != null && ch.epg != null) attrs.push(`tvg-id="${clean(ch.tvg_id)}"`);
   attrs.push(`tvg-name="${clean(ch.tvg_name)}"`); // drives both the attr and the trailing display name
   if (ch.channelNo != null) attrs.push(`tvg-chno="${clean(ch.channelNo)}"`);
-  if (ch.logoUrl != null) attrs.push(`tvg-logo="${clean(ch.logoUrl)}"`);
+  const logo = logoOverride !== undefined ? logoOverride : ch.logoUrl;
+  if (logo != null) attrs.push(`tvg-logo="${clean(logo)}"`);
   if (ch.group != null) attrs.push(`group-title="${clean(ch.group)}"`);
 
   return `#EXTINF:-1 ${attrs.join(' ')},${clean(ch.tvg_name)}\n${url}`;

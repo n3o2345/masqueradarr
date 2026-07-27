@@ -3,35 +3,48 @@
 // https://github.com/n3o2345/philo-proxy). Unlike the public FAST/CDN adapters (pluto, xumo, …), philo-proxy
 // has no fixed public domain — it's the operator's own LAN/compose service, addressed via PHILO_PROXY_URL
 // (default assumes a `philo-proxy` compose service on its default port 5050; override for a different
-// host/port). masqueradarr talks to it like any other trusted upstream: GET /api/channels for the catalog,
-// GET /stream/:id/philo.m3u8 to play. NO auth handshake happens on this side — philo-proxy holds the real
-// Philo session internally and serves both endpoints unauthenticated on its own network (see its routes/
-// channels.js + routes/stream.js) — so requiresAuth is NOT set here.
+// host/port). masqueradarr talks to it like any other trusted upstream: GET /channels.m3u for the catalog
+// (an EXTM3U playlist — tvg-id/tvg-logo/group-title/the real per-channel .m3u8 URL, one line per channel),
+// GET /epg.xml for its own XMLTV guide. NO auth handshake happens on this side — philo-proxy holds the real
+// Philo session internally and serves both endpoints unauthenticated on its own network — so requiresAuth is
+// NOT set here.
 //
-// Each channel's stream_url is already resolved and stable for as long as philo-proxy stays up, so this is a
-// direct-HLS source (the `direct`/freelivesports posture): normalize() stores the real .m3u8 entry point,
-// isEntryUrl is the standard composer test, and resolveStream is identity — nothing to mint per play. The
-// proxy trusts ONLY the configured philo-proxy host (not "any http(s)" like `direct` — this is one known,
-// operator-configured upstream, not an arbitrary user import).
+// CHANGED (2026-07): catalog + guide now come from philo-proxy's own EXTM3U + XMLTV exports (like every other
+// self-hosted or public source), not its old /api/channels JSON row shape — same upstream service, just its
+// published-playlist surface instead of its internal DB rows. This makes Philo a PLAYLIST-BOUND-EPG source
+// like pluto/tubi/freelivesports (afterSync builds the self-EPG + self-links untouched channels), instead of
+// requiring the operator to manually add philo-proxy's /epg.xml as its own EPG source and hand-match channels
+// (the old dulo-style posture).
 //
-// philo-proxy also serves its own XMLTV guide at /epg.xml (routes/export.js) — add it as a normal EPG source
-// (Settings → EPG Sources → Add → URL, pointed at `${PHILO_PROXY_URL}/epg.xml`) and match channels in Channel
-// Mapping. No adapter-side self-EPG wiring here (unlike pluto/tubi/freelivesports, whose guides ride the same
-// catalog fetch) — philo-proxy's guide is a separate endpoint with its own refresh cadence.
+// Each channel's stream URL comes straight from channels.m3u (already resolved/stable for as long as
+// philo-proxy stays up), so this is a direct-HLS source (the `direct`/freelivesports posture): normalize()
+// stores the real .m3u8 entry point verbatim, isEntryUrl is the standard composer test, and resolveStream is
+// identity — nothing to mint per play. The proxy trusts ONLY the configured philo-proxy host (not "any
+// http(s)" like `direct` — this is one known, operator-configured upstream, not an arbitrary user import).
 
+import { parseM3u } from '../../m3u/parse.js';
+import { EpgChannel } from '../../models/EpgChannel.js';
+import { syncXmltvUrl } from '../../epg/xmltvIngest.js';
+import { linkFastSelfEpg, upsertFastEpgSource } from '../../epg/fastSelfEpg.js';
+import { resolveProgramOffset } from '../../settings/programOffset.js';
+import { logger } from '../core/logger.js';
 import type { SourceAdapter, ArtifactType } from '../types.js';
 import type { SourceChannelDoc } from '../../models/SourceChannel.js';
 
 const SOURCE_ID = 'philo';
 const PHILO_PROXY_URL = (process.env.PHILO_PROXY_URL || 'http://philo-proxy:5050').replace(/\/+$/, '');
+const PLAYLIST_URL = `${PHILO_PROXY_URL}/channels.m3u`;
+const EPG_URL = `${PHILO_PROXY_URL}/epg.xml`;
+const PHILO_EPG_NAME = 'Philo Guide';
 
-// Shape of a row from philo-proxy's GET /api/channels (src/routes/channels.js → the sqlite `channels` table).
+// One parsed EXTM3U row → the shape normalize() needs. Kept minimal — parseM3u already did the attribute
+// extraction; this just carries it through listChannels' { raw, meta } contract like every other adapter.
 interface PhiloRow {
-  id: number | string;
+  id: string; // tvg-id — also the id philo-proxy's epg.xml uses for <channel id="…">, so the two line up
   name: string;
-  logo_url: string | null;
-  group_name: string | null;
-  enabled: number | boolean;
+  logo: string | null;
+  group: string | null;
+  url: string; // the real, already-playable .m3u8 (or other) stream URL
 }
 
 // Cached once — PHILO_PROXY_URL is fixed for the process lifetime (an env var, not a per-request value).
@@ -50,35 +63,38 @@ const philoAdapter: SourceAdapter = {
   // fallback to bundle — an unreachable box just yields an empty, warn-flagged sync (buildSource.ts) rather
   // than a stale committed catalog.
   async listChannels() {
-    const url = `${PHILO_PROXY_URL}/api/channels?enabled=1`;
     try {
-      const res = await fetch(url);
+      const res = await fetch(PLAYLIST_URL);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const raw = (await res.json()) as PhiloRow[];
-      return { raw, meta: { endpoint: url, live: true, fetchedAt: new Date().toISOString() } };
+      const text = await res.text();
+      const { entries } = parseM3u(text);
+      const raw: PhiloRow[] = entries
+        .filter((e) => e.tvgId) // an entry with no tvg-id can't be linked to the epg.xml guide or re-synced idempotently
+        .map((e) => ({ id: e.tvgId as string, name: e.name, logo: e.tvgLogo, group: e.groupTitle, url: e.url }));
+      return { raw, meta: { endpoint: PLAYLIST_URL, live: true, count: raw.length, fetchedAt: new Date().toISOString() } };
     } catch (err) {
       return {
         raw: [],
-        meta: { endpoint: url, live: false, reason: (err as Error).message, fetchedAt: new Date().toISOString() },
+        meta: { endpoint: PLAYLIST_URL, live: false, reason: (err as Error).message, fetchedAt: new Date().toISOString() },
       };
     }
   },
 
   normalize(raw: PhiloRow, { ingestedAt }): SourceChannelDoc | null {
-    if (raw == null || raw.id == null || !raw.name) return null;
-    const id = String(raw.id);
-    const group = raw.group_name || 'Philo';
+    if (raw == null || !raw.id || !raw.name || !raw.url) return null;
+    const group = raw.group || 'Philo';
     return {
-      _id: `${SOURCE_ID}:${id}`,
+      _id: `${SOURCE_ID}:${raw.id}`,
       source: SOURCE_ID,
-      sourceChannelId: id,
+      sourceChannelId: raw.id,
       name: raw.name,
       category: group,
       groupKey: group,
       groupLabel: group,
-      logoUrl: raw.logo_url || null,
-      // The real, already-playable master — philo-proxy resolves/transcodes Philo itself.
-      streamEntryUrl: `${PHILO_PROXY_URL}/stream/${id}/philo.m3u8`,
+      logoUrl: raw.logo || null,
+      // The real, already-playable master straight from channels.m3u — philo-proxy resolves/transcodes
+      // Philo itself, so there's nothing left to construct here.
+      streamEntryUrl: raw.url,
       isPlayable: true,
       sourceCreatedAt: null,
       sourceUpdatedAt: null,
@@ -88,13 +104,14 @@ const philoAdapter: SourceAdapter = {
 
   grouping: { by: 'groupKey', groupOrder: 'alpha', channelOrder: 'name' },
 
-  // Add Playlist "Built-In" summary. No self-built guide here (see the file header) — the operator adds
-  // philo-proxy's /epg.xml as its own EPG source and matches channels manually, like dulo.
+  // Add Playlist "Built-In" summary. philo-proxy publishes its own XMLTV guide (epg.xml) keyed by the SAME
+  // channel ids as channels.m3u's tvg-id, so afterSync below builds a real self-EPG (like pluto/tubi) →
+  // Playlist-bound EPG is true; the operator no longer adds/matches it by hand.
   builtinMeta: {
     globalPlaylist: true,
     clonePlaylist: true,
     syncSchedules: true,
-    playlistBoundEpg: false,
+    playlistBoundEpg: true,
     epgSyncSchedules: false,
   },
 
@@ -133,13 +150,38 @@ const philoAdapter: SourceAdapter = {
     classifyArtifact(url: string): ArtifactType {
       try {
         const p = new URL(url).pathname.toLowerCase();
-        if (p.includes('/philo-seg/')) return 'segment'; // src/routes/stream.js: /:channelId/philo-seg/:segment
+        if (p.includes('-seg') || p.includes('/seg/') || p.includes('segment')) return 'segment';
         if (p.endsWith('.m3u8')) return 'master';
         return 'other';
       } catch {
         return 'other';
       }
     },
+  },
+
+  // ── post-sync: build the philo-proxy self-EPG from its own epg.xml, then self-link untouched channels ──
+  // Live-only (a snapshot never exists for Philo — see listChannels — so `live` is effectively always true
+  // on a reachable box; guarded anyway for symmetry with the FAST family). Non-fatal: logged and swallowed,
+  // never fails the channel sync.
+  async afterSync({ sourceId, live }) {
+    if (!live) return;
+    try {
+      const { offset, defaulted } = await resolveProgramOffset();
+      if (defaulted) logger.warn('seed', `[${sourceId}] settings offset unset — guide times stored as UTC (+0000)`);
+      // Streams + REPLACES this source's epgchannels/programs straight from philo-proxy's XMLTV (bounded
+      // memory; same path a remote-url EPG source uses). buildEpgChannel/buildProgram already stamp the
+      // "<sourceId>:<id>" composite keys, so this lines up 1:1 with writeFastEpg's convention.
+      const counts = await syncXmltvUrl(sourceId, EPG_URL, offset);
+      const channelIds = await EpgChannel.find({ source: sourceId }).distinct('channelId');
+      await upsertFastEpgSource(sourceId, counts, { name: PHILO_EPG_NAME, url: EPG_URL });
+      const linked = await linkFastSelfEpg(sourceId, channelIds);
+      logger.info(
+        'seed',
+        `[${sourceId}] self-EPG: ${counts.channels} channels / ${counts.programs} programs; linked ${linked} untouched channel(s)`,
+      );
+    } catch (err) {
+      logger.warn('seed', `[${sourceId}] self-EPG (epg.xml) failed (continuing): ${(err as Error).message}`);
+    }
   },
 };
 

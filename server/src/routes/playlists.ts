@@ -274,10 +274,18 @@ playlistsRouter.put('/:id', requireAdmin, async (req, res, next) => {
       }
       $set.applyTagsToChannels = body.applyTagsToChannels;
     }
+    // Per-playlist "use the matched EPG guide's channel logo" toggle — read at export time by
+    // m3u/compose.ts (buildLogoOverrides), never touched by a sync.
+    if (body.useEpgLogo !== undefined) {
+      if (typeof body.useEpgLogo !== 'boolean') {
+        return res.status(400).json({ error: 'useEpgLogo (boolean) required' });
+      }
+      $set.useEpgLogo = body.useEpgLogo;
+    }
     if (!Object.keys($set).length) {
       return res.status(400).json({
         error:
-          'no editable fields provided (name, state, pinned, endpoint, url, interval, auto, tags, applyTagsToChannels)',
+          'no editable fields provided (name, state, pinned, endpoint, url, interval, auto, tags, applyTagsToChannels, useEpgLogo)',
       });
     }
 
@@ -354,6 +362,14 @@ playlistsRouter.put('/:id', requireAdmin, async (req, res, next) => {
         );
       } catch (err) {
         logger.warn('m3u', `reconcile after playlist edit failed: ${(err as Error).message}`);
+      }
+    } else if (body.useEpgLogo !== undefined) {
+      // Toggling the logo source alone doesn't change endpoint/state/url, but every export surface this
+      // playlist feeds needs a recompose so the swap shows up without waiting for the next scheduled sync.
+      try {
+        await composeM3u(doc.id);
+      } catch (err) {
+        logger.warn('m3u', `recompose after useEpgLogo toggle failed: ${(err as Error).message}`);
       }
     }
 
