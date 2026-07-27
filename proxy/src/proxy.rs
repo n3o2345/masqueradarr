@@ -23,7 +23,7 @@ use url::Url;
 use crate::log;
 use crate::manifest::{enc, rewrite_manifest, RewriteResult};
 use crate::state::{AppState, ResolveErr, SourcePolicy, MAX_FAILOVER_ATTEMPTS};
-use crate::stream::{segment_body, TelemetryCtx};
+use crate::stream::{raw_socket_body, segment_body, SocketTelemetryCtx, TelemetryCtx};
 
 // RSL-3 upstream retry. A transient failure (transport error, or a 502/503/504 gateway status) is retried with
 // bounded backoff before the request is failed; a definitive response (2xx, 4xx, or a non-gateway 5xx) is used
@@ -519,6 +519,34 @@ pub async fn serve_stream(
         log::trace("proxy", &rid, || format!("HEAD segment → 200 {out_ct} (no body)"));
         return raw(200, &out_ct, Vec::new());
     }
+
+    // An ENTRY that resolved straight to non-manifest media (no HLS to poll at all — e.g. an HDHomeRun
+    // tuner's raw MPEG-TS, or any other adapter's raw passthrough) is a CONTINUOUS stream, not a one-shot
+    // segment: it can hold this same pipe open for the whole viewing session. The generic segment_body
+    // model only reports egress once at `finish`, which — for a pipe that might not finish for hours —
+    // means the channel never shows as an Active Stream while it's actually playing, and its egress never
+    // "flows out" until the viewer disconnects. A HOP is still a genuine short segment fetch (its polling
+    // HLS entry is the heartbeat), so it keeps the existing segment_body path unchanged.
+    if !is_hop {
+        log::trace("proxy", &rid, || format!("streaming raw-passthrough entry as {out_ct} from {}", host_of(&fetch_url)));
+        let ctx = SocketTelemetryCtx {
+            state: state.clone(),
+            source: source.to_string(),
+            entry: stream_entry.clone(),
+            rid: rid.clone(),
+            ip,
+            ua,
+            username,
+            player_type: player.to_string(),
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", out_ct)
+            .header("cache-control", "no-store")
+            .body(raw_socket_body(resp, ctx, read_timeout_ms, buffer_size_kb))
+            .unwrap();
+    }
+
     log::trace("proxy", &rid, || format!("streaming segment as {out_ct} from {}", host_of(&fetch_url)));
     let ctx = TelemetryCtx {
         state: state.clone(),

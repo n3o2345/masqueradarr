@@ -11,7 +11,7 @@
 use axum::body::Body;
 use bytes::Bytes;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
@@ -131,6 +131,115 @@ async fn pump(
         }
     }
     ctx.finish(total, errored);
+}
+
+/// Telemetry attribution for a continuous raw-passthrough ENTRY stream (no manifest at all — e.g. an
+/// HDHomeRun tuner's raw MPEG-TS, or any other adapter whose entry URL IS the playable media with nothing
+/// to poll). Unlike a HOP/segment (a short, self-contained fetch reported once at `finish`), this pipe can
+/// stay open for the entire viewing session, so it uses the SOCKET model (open → Node mints a connId;
+/// periodic `sbytes` → egress; `close` → session end) — the same model tsmux.rs already uses for its raw-TS
+/// producer — instead of the poll-recency model, so the channel shows as an Active Stream immediately and
+/// its egress flows out continuously, not just once at disconnect.
+pub struct SocketTelemetryCtx {
+    pub state: AppState,
+    pub source: String,
+    pub entry: String,
+    pub rid: String,
+    pub ip: String,
+    pub ua: String,
+    pub username: Option<String>,
+    pub player_type: String, // "appPlayer" | "externalPlayer"
+}
+
+// How often a live socket session flushes its accumulated egress (mirrors tsmux's 1s cadence) so Active
+// Streams shows a real-time rate instead of one lump sum at the end of a potentially hours-long tune.
+const SOCKET_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Build the axum response Body for a continuous raw-passthrough ENTRY: reports `open` immediately (so the
+/// channel shows as an Active Stream from the first byte), pumps the upstream body into the client with a
+/// periodic `sbytes` flush, and reports `close` when the pipe ends (EOF, error, stall, or client disconnect).
+pub fn raw_socket_body(
+    resp: reqwest::Response,
+    ctx: SocketTelemetryCtx,
+    read_timeout_ms: u64,
+    buffer_size_kb: u64,
+) -> Body {
+    let stream_id = ctx.state.next_stream_id();
+    log::info("stream", &ctx.rid, || format!("raw-socket session open ({stream_id})"));
+    ctx.state.report(serde_json::json!({
+        "kind": "open", "streamId": stream_id, "source": ctx.source, "entryUrl": ctx.entry,
+        "ip": ctx.ip, "ua": ctx.ua, "username": ctx.username, "playerType": ctx.player_type,
+    }));
+    let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(channel_capacity(buffer_size_kb));
+    let idle = if read_timeout_ms > 0 {
+        Some(Duration::from_millis(read_timeout_ms))
+    } else {
+        None
+    };
+    tokio::spawn(socket_pump(resp, tx, ctx, stream_id, idle));
+    Body::from_stream(ReceiverStream::new(rx))
+}
+
+async fn socket_pump(
+    resp: reqwest::Response,
+    tx: mpsc::Sender<Result<Bytes, io::Error>>,
+    ctx: SocketTelemetryCtx,
+    stream_id: String,
+    idle: Option<Duration>,
+) {
+    let mut stream = Box::pin(resp.bytes_stream());
+    let mut pending_bytes: u64 = 0;
+    let mut last_flush = Instant::now();
+    let mut errored = false;
+    loop {
+        let next = match idle {
+            Some(d) => match tokio::time::timeout(d, stream.next()).await {
+                Ok(n) => n,
+                Err(_) => {
+                    errored = true;
+                    let _ = tx
+                        .send(Err(io::Error::new(io::ErrorKind::TimedOut, "upstream stalled")))
+                        .await;
+                    break;
+                }
+            },
+            None => stream.next().await,
+        };
+        match next {
+            Some(Ok(chunk)) => {
+                pending_bytes += chunk.len() as u64;
+                if tx.send(Ok(chunk)).await.is_err() {
+                    break; // client disconnected — stop reading upstream
+                }
+            }
+            Some(Err(e)) => {
+                errored = true;
+                let _ = tx.send(Err(io::Error::other(e.to_string()))).await;
+                break;
+            }
+            None => break, // clean EOF
+        }
+        if pending_bytes > 0 && last_flush.elapsed() >= SOCKET_FLUSH_INTERVAL {
+            ctx.state.report(serde_json::json!({
+                "kind": "sbytes", "streamId": stream_id, "bytes": pending_bytes,
+            }));
+            pending_bytes = 0;
+            last_flush = Instant::now();
+        }
+    }
+    if pending_bytes > 0 {
+        ctx.state.report(serde_json::json!({ "kind": "sbytes", "streamId": stream_id, "bytes": pending_bytes }));
+    }
+    if errored {
+        log::warn("stream", &ctx.rid, || "raw-socket session ended on an upstream stall/error".to_string());
+        ctx.state.report(serde_json::json!({
+            "kind": "upstream", "ok": false, "status": 0, "source": ctx.source, "entryUrl": ctx.entry,
+        }));
+    } else {
+        log::trace("stream", &ctx.rid, || "raw-socket session ended cleanly (upstream EOF)".to_string());
+    }
+    log::info("stream", &ctx.rid, || format!("raw-socket session close ({stream_id})"));
+    ctx.state.report(serde_json::json!({ "kind": "close", "streamId": stream_id }));
 }
 
 #[cfg(test)]
