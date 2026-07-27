@@ -15,7 +15,14 @@ import { logger } from '../../core/logger.js';
 import { reconcileFailoverGroups } from '../../../services/failover.js';
 import { tombstonedIds } from '../../../services/tombstones.js';
 import { reconcileGroupRegistry } from '../../../services/groups.js';
-import { fetchDiscover, fetchLineup, type HdhrLineupEntry } from './lineup.js';
+import {
+  fetchDiscover,
+  fetchLineup,
+  applyHdhrProfile,
+  isHdhrProfile,
+  type HdhrLineupEntry,
+  type HdhrProfile,
+} from './lineup.js';
 
 export const HDHR_SOURCE = 'hdhomerun'; // Playlist.source TYPE TAG (channels keyed by the playlist id, like 'clone'/'import')
 export const HDHR_ORIGIN = 'hdhomerun'; // PlaylistChannel.origin → routes the stream through the hdhomerun remux adapter
@@ -26,7 +33,7 @@ export const HDHR_ORIGIN = 'hdhomerun'; // PlaylistChannel.origin → routes the
 // kept visible + reversible); the device gives no EPG/group/logo, so those stay explicit null (the OTA
 // channel can be linked to a Gracenote EPG source later via Channel Mapping). `_id` is keyed by the canonical
 // GuideNumber so a re-sync is idempotent and preserves the operator's edits on a survivor.
-function toHdhrChannel(e: HdhrLineupEntry, importId: string): PlaylistChannelDoc {
+function toHdhrChannel(e: HdhrLineupEntry, importId: string, profile: HdhrProfile): PlaylistChannelDoc {
   const _id = `${importId}:${e.guideNumber}`;
   return {
     _id,
@@ -43,7 +50,7 @@ function toHdhrChannel(e: HdhrLineupEntry, importId: string): PlaylistChannelDoc
     origin: HDHR_ORIGIN,
     logoColor: logoColorFor(_id),
     logoUrl: null,
-    streamEntryUrl: e.url,
+    streamEntryUrl: applyHdhrProfile(e.url, profile),
     failoverGroupId: null,
     failoverRole: null,
     failoverOrder: null,
@@ -55,14 +62,14 @@ function toHdhrChannel(e: HdhrLineupEntry, importId: string): PlaylistChannelDoc
 // (routes/import.ts): device-owned routing/display fields go in $set (refreshed every sync); user-editable
 // fields ($setOnInsert) are written once and PRESERVED across re-syncs. Then PRUNE channels that vanished
 // from the lineup (a survivor keeps its edits; a removed channel is dropped) — mirrors syncLive's prune.
-async function upsertHdhrChannels(entries: HdhrLineupEntry[], importId: string): Promise<void> {
+async function upsertHdhrChannels(entries: HdhrLineupEntry[], importId: string, profile: HdhrProfile): Promise<void> {
   // Tombstone gate: never re-insert an operator-deleted channel; its id still joins `seen` so the prune
   // below ($nin [...seen]) treats it as accounted-for.
   const dead = await tombstonedIds(importId);
   const seen = new Set<string>();
   const ops: unknown[] = [];
   for (const e of entries) {
-    const pc = toHdhrChannel(e, importId);
+    const pc = toHdhrChannel(e, importId, profile);
     if (seen.has(pc._id)) continue;
     seen.add(pc._id);
     if (dead.has(pc._id)) continue;
@@ -121,15 +128,16 @@ export async function syncHdhrPlaylist(id: string): Promise<{ channels: number; 
   // migration normalizes it to 'hdhomerun', but the /sync route may run before that on a stale DB).
   const pl = (await Playlist.findOne(
     { id, source: { $regex: `^${HDHR_SOURCE}$`, $options: 'i' } },
-    { _id: 0, deviceUrl: 1, name: 1 },
-  ).lean()) as { deviceUrl?: string | null; name?: string } | null;
+    { _id: 0, deviceUrl: 1, name: 1, hdhrProfile: 1 },
+  ).lean()) as { deviceUrl?: string | null; name?: string; hdhrProfile?: string } | null;
   if (!pl) throw new Error('not_an_hdhomerun_playlist');
   const base = pl.deviceUrl ?? '';
   if (!base) throw new Error('missing_device_url');
+  const profile: HdhrProfile = isHdhrProfile(pl.hdhrProfile) ? pl.hdhrProfile : 'auto';
 
   const disc = await fetchDiscover(base);
   const lineup = await fetchLineup(base);
-  await upsertHdhrChannels(lineup, id);
+  await upsertHdhrChannels(lineup, id, profile);
 
   const channels = (await PlaylistChannel.find({ source: id }, { group: 1 }).lean()) as Array<{
     group: string | null;

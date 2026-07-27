@@ -29,6 +29,10 @@ const baseDomain = computed(() => domain.value.replace(/\/$/, ''));
 // canComposeSchedule below. The global endpoint option stays hidden for a clone (custom-only).
 const isClone = computed(() => props.playlist.source === 'clone');
 
+// An HDHomeRun-import playlist (source is 'hdhomerun', case-insensitive per the pre-normalization legacy tag —
+// see CUSTOM_SOURCES in routes/customPlaylists.ts) — gates the output-profile picker below.
+const isHdhr = computed(() => (props.playlist.source ?? '').toLowerCase() === 'hdhomerun');
+
 // ── Per-playlist (Custom) proxy config (CFG/UICFG) ─────────────────────────────────────────────────────
 // The video engine applies the (Default) config to every playlist unless this playlist has its own override,
 // keyed app_<playlist.id> — which === the ?pl the composed M3U stamps for its channels (m3u/serialize.ts).
@@ -334,6 +338,25 @@ function setUseEpgLogo(v: boolean) {
   save({ useEpgLogo: v });
 }
 
+// HDHomeRun output profile (resolution/transcode) — only shown for an HDHomeRun playlist (isHdhr). 'auto' is
+// the raw broadcast stream every device supports; the rest only work on a tuner with onboard transcoding
+// hardware (a device without it will simply fail to sync/play at that profile). The server resyncs the
+// device on change so every channel's URL picks up the new profile immediately.
+const HDHR_PROFILE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'auto', label: 'Auto (no transcode — raw broadcast stream)' },
+  { value: 'heavy', label: 'Heavy' },
+  { value: 'internet1080', label: '1080p' },
+  { value: 'internet720', label: '720p' },
+  { value: 'internet480-5000', label: '480p (5000 kbps)' },
+  { value: 'internet480', label: '480p' },
+  { value: 'mobile', label: 'Mobile' },
+];
+const hdhrProfile = ref(props.playlist.hdhrProfile || 'auto');
+function setHdhrProfile(v: string) {
+  hdhrProfile.value = v;
+  save({ hdhrProfile: v });
+}
+
 function setMode(m: 'global' | 'custom') {
   mode.value = m;
   save({ endpoint: m, url: hostedUrl.value });
@@ -490,6 +513,26 @@ function onCustomPath(v: string) {
             <Toggle :on="useEpgLogo" @change="setUseEpgLogo" />
           </div>
         </div>
+
+        <template v-if="isHdhr">
+          <div class="divider" />
+
+          <!-- HDHomeRun-only: pick the device's output profile (resolution/transcode) for every channel. -->
+          <div class="form-row">
+            <div class="field-lbl">Output profile</div>
+            <div class="select fill">
+              <select :value="hdhrProfile" @change="setHdhrProfile(($event.target as HTMLSelectElement).value)">
+                <option v-for="opt in HDHR_PROFILE_OPTIONS" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+            </div>
+            <div class="muted" style="font-size: var(--fs-xs); margin-top: 6px;">
+              Anything besides Auto only works if this tuner supports onboard transcoding — an unsupported
+              profile will fail to sync/play. Changing this resyncs the device now.
+            </div>
+          </div>
+        </template>
 
         <div class="divider" />
 

@@ -10,6 +10,7 @@ import { logger } from '../sources/core/logger.js';
 import { reconcileFailoverGroups } from '../services/failover.js';
 import { reconcileGroupRegistry } from '../services/groups.js';
 import { syncHdhrPlaylist, HDHR_SOURCE } from '../sources/adapters/hdhomerun/import.js';
+import { isHdhrProfile } from '../sources/adapters/hdhomerun/lineup.js';
 import { syncLocalPlaylist, LOCAL_SOURCE } from '../sources/adapters/local/import.js';
 import { syncUrlPlaylist } from './import.js';
 import { EpgSource } from '../models/EpgSource.js';
@@ -231,6 +232,18 @@ customPlaylistsRouter.put('/:id', async (req, res, next) => {
       );
     }
 
+    // HDHomeRun output profile (resolution/transcode) — only meaningful on an hdhomerun playlist. An invalid
+    // value is a 400 (never silently ignored/coerced); a same-value write is a no-op (no pointless resync).
+    let profileChanged = false;
+    if (body.hdhrProfile !== undefined) {
+      if (!/^hdhomerun$/i.test(clone.source ?? '')) {
+        return res.status(400).json({ error: 'hdhrProfile only applies to an HDHomeRun playlist' });
+      }
+      if (!isHdhrProfile(body.hdhrProfile)) return res.status(400).json({ error: 'invalid_profile' });
+      profileChanged = clone.hdhrProfile !== body.hdhrProfile;
+      clone.hdhrProfile = body.hdhrProfile;
+    }
+
     const channels = (await PlaylistChannel.find({ source: clone.id }, { group: 1 }).lean()) as Array<{
       group: string | null;
     }>;
@@ -239,9 +252,18 @@ customPlaylistsRouter.put('/:id', async (req, res, next) => {
     // Union-only registry reconcile owns Playlist.groups (preserves operator-created empty groups).
     await reconcileGroupRegistry(clone.id);
 
-    await composeM3u(clone.id).catch((err) =>
-      logger.warn('m3u', `compose after clone update failed: ${(err as Error).message}`),
-    );
+    if (profileChanged) {
+      // Re-fetch the device lineup so every channel's streamEntryUrl is rebuilt with the new profile's path
+      // segment — best-effort: a transient device hiccup here must never fail the settings write itself (the
+      // operator can always hit "Sync now"/retry).
+      await syncHdhrPlaylist(clone.id).catch((err) =>
+        logger.warn('hdhr', `resync after hdhrProfile change (${clone.id}) failed: ${(err as Error).message}`),
+      );
+    } else {
+      await composeM3u(clone.id).catch((err) =>
+        logger.warn('m3u', `compose after clone update failed: ${(err as Error).message}`),
+      );
+    }
 
     res.json(toView({ id: clone.id, name: clone.name, lastSync: clone.lastSync }, channels.length));
   } catch (err) {

@@ -14,6 +14,8 @@ import { AuthRequest, requireAdmin } from '../middleware/auth.js';
 import { composeM3u, composeGlobal, pruneCustomFile, reconcilePlaylistExport, recomposeAllExports } from '../m3u/compose.js';
 import { normalizeEndpointPath, isReservedEndpointPath, isCustomPlaylistType } from '../m3u/paths.js';
 import { cascadeDeleteCustomPlaylist } from './customPlaylists.js';
+import { syncHdhrPlaylist } from '../sources/adapters/hdhomerun/import.js';
+import { isHdhrProfile } from '../sources/adapters/hdhomerun/lineup.js';
 import { cascadeDeleteEpgSource } from './epgSources.js';
 import {
   cascadeFailoverEpg,
@@ -202,7 +204,7 @@ playlistsRouter.put('/:id', requireAdmin, async (req, res, next) => {
     // on the endpoint/state/url transition (SKILL §8).
     const before = await Playlist.findOne(
       { id: req.params.id },
-      { _id: 0, endpoint: 1, url: 1, state: 1, source: 1, pinned: 1 },
+      { _id: 0, endpoint: 1, url: 1, state: 1, source: 1, pinned: 1, hdhrProfile: 1 },
     ).lean();
     if (!before) return res.status(404).json({ error: 'not_found' });
 
@@ -282,10 +284,20 @@ playlistsRouter.put('/:id', requireAdmin, async (req, res, next) => {
       }
       $set.useEpgLogo = body.useEpgLogo;
     }
+    // HDHomeRun output profile (resolution/transcode) — only meaningful on an hdhomerun-type playlist; baked
+    // into each channel's streamEntryUrl by a resync (triggered below on an actual change). An invalid value,
+    // or setting it on a non-HDHomeRun playlist, is a 400 rather than a silent no-op.
+    if (body.hdhrProfile !== undefined) {
+      if (!/^hdhomerun$/i.test(before.source ?? '')) {
+        return res.status(400).json({ error: 'hdhrProfile only applies to an HDHomeRun playlist' });
+      }
+      if (!isHdhrProfile(body.hdhrProfile)) return res.status(400).json({ error: 'invalid_profile' });
+      $set.hdhrProfile = body.hdhrProfile;
+    }
     if (!Object.keys($set).length) {
       return res.status(400).json({
         error:
-          'no editable fields provided (name, state, pinned, endpoint, url, interval, auto, tags, applyTagsToChannels, useEpgLogo)',
+          'no editable fields provided (name, state, pinned, endpoint, url, interval, auto, tags, applyTagsToChannels, useEpgLogo, hdhrProfile)',
       });
     }
 
@@ -370,6 +382,14 @@ playlistsRouter.put('/:id', requireAdmin, async (req, res, next) => {
         await composeM3u(doc.id);
       } catch (err) {
         logger.warn('m3u', `recompose after useEpgLogo toggle failed: ${(err as Error).message}`);
+      }
+    } else if (body.hdhrProfile !== undefined && before.hdhrProfile !== doc.hdhrProfile) {
+      // Re-fetch the device lineup so every channel's streamEntryUrl is rebuilt with the new profile's path
+      // segment. Best-effort — a transient device hiccup here must never fail the settings write itself.
+      try {
+        await syncHdhrPlaylist(doc.id);
+      } catch (err) {
+        logger.warn('hdhr', `resync after hdhrProfile change (${doc.id}) failed: ${(err as Error).message}`);
       }
     }
 

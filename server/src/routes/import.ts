@@ -14,6 +14,7 @@ import {
   normalizeDeviceBase,
   fetchDiscover,
   fetchLineupM3uText,
+  isHdhrProfile,
 } from '../sources/adapters/hdhomerun/lineup.js';
 import { syncHdhrPlaylist, HDHR_SOURCE } from '../sources/adapters/hdhomerun/import.js';
 import { syncLocalPlaylist, LOCAL_SOURCE } from '../sources/adapters/local/import.js';
@@ -350,6 +351,10 @@ importRouter.post('/hdhomerun', async (req, res, next) => {
     if (!name) return res.status(400).json({ error: 'name (non-empty string) required' });
     const base = normalizeDeviceBase(typeof body.address === 'string' ? body.address : '');
     if (!base) return res.status(400).json({ error: 'invalid_address' });
+    // Optional at creation — defaults to 'auto' (every device supports it); an invalid value is a 400 rather
+    // than silently falling back, so a typo'd profile never ships as "auto" unnoticed.
+    const profile = body.profile === undefined ? 'auto' : body.profile;
+    if (!isHdhrProfile(profile)) return res.status(400).json({ error: 'invalid_profile' });
 
     // Confirm the device is reachable BEFORE creating a row (a bad/offline device → 400, not a ghost playlist).
     let disc;
@@ -388,6 +393,7 @@ importRouter.post('/hdhomerun', async (req, res, next) => {
       deviceUrl: base,
       deviceName: disc.friendlyName,
       deviceTunerCount: disc.tunerCount,
+      hdhrProfile: profile,
     });
 
     // Pull the lineup into channels (+ recompute groups, refresh device identity, compose). On failure roll

@@ -32,6 +32,13 @@ const PlaylistSchema = new Schema(
     deviceUrl: { type: String, default: null },
     deviceTunerCount: { type: Number, default: null },
     deviceName: { type: String, default: null },
+    // The operator's chosen HDHomeRun output profile (resolution/transcode) — set ONLY for an HDHomeRun-import
+    // playlist. 'auto' (the default) is the raw, untranscoded broadcast stream every device serves; the other
+    // values (see sources/adapters/hdhomerun/lineup.ts HDHR_PROFILES) only work on a tuner with onboard
+    // transcoding hardware. Applied by baking it into each channel's streamEntryUrl at import/sync time (see
+    // hdhomerun/import.ts toHdhrChannel) — changing it takes effect on the next sync, which the PUT route
+    // triggers automatically.
+    hdhrProfile: { type: String, default: 'auto' },
     // Remote-URL import source — set ONLY for a remote-URL m3u import playlist (source:'url'); null for every
     // other playlist. The upstream `.m3u`/`.m3u8` URL the create import fetched, persisted so a manual
     // "Sync now" (POST /api/custom-playlists/:id/sync) or a scheduled sync can RE-FETCH + reconcile this

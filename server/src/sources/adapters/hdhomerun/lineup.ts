@@ -11,6 +11,46 @@
 const TIMEOUT_MS = Number(process.env.HDHR_TIMEOUT_MS || 8000);
 const UA = 'Masqueradarr-hdhr/1.0';
 
+// HDHomeRun's own output-profile path segments. A device's lineup.json always advertises the raw,
+// untranscoded URL (…/auto/v<ch>) — "auto" here means "no transcode, passthrough at broadcast resolution",
+// NOT "pick a resolution automatically". A device with onboard transcoding (e.g. FLEX/SCRIBE 4K) additionally
+// serves the SAME channel at each of these fixed profiles by swapping that one path segment; a tuner without
+// transcoding hardware just 404s on anything but "auto" (surfaced to the operator as a failed sync/playback,
+// not silently downgraded). See applyHdhrProfile below and Playlist.hdhrProfile.
+export const HDHR_PROFILES = [
+  'auto',
+  'heavy',
+  'internet1080',
+  'internet720',
+  'internet480-5000',
+  'internet480',
+  'mobile',
+] as const;
+export type HdhrProfile = (typeof HDHR_PROFILES)[number];
+
+export function isHdhrProfile(v: unknown): v is HdhrProfile {
+  return typeof v === 'string' && (HDHR_PROFILES as readonly string[]).includes(v);
+}
+
+// Swap a device stream URL's leading profile segment (lineup.json always gives "auto", e.g.
+// http://192.168.2.22:5004/auto/v33.1) for the operator's chosen output profile. "auto" is a no-op (avoids a
+// pointless URL rebuild on the common/default case). Any URL that doesn't match the expected
+// <base>/<segment>/<rest> shape is returned UNCHANGED rather than mangled — a device firmware oddity should
+// never cost the channel its playable URL.
+export function applyHdhrProfile(url: string, profile: HdhrProfile): string {
+  if (profile === 'auto') return url;
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split('/').filter(Boolean); // ["auto", "v33.1"]
+    if (parts.length < 2) return url;
+    parts[0] = profile;
+    u.pathname = '/' + parts.join('/');
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 export interface HdhrDiscover {
   friendlyName: string;
   modelNumber: string;

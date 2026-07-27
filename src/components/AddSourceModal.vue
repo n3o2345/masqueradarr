@@ -38,6 +38,20 @@ const fileName = ref('');
 const content = ref(''); // raw m3u text (file mode)
 const url = ref(''); // remote URL (url mode)
 const hdhrAddress = ref(''); // HDHomeRun device address (hdhr mode)
+// The output profile (resolution/transcode) to request at creation — 'auto' (raw broadcast, always supported)
+// unless the operator picks one of the device's onboard-transcode profiles. Same option list/meaning as the
+// per-playlist picker in PlaylistStatusDrawer.vue (post-creation, this one applies once and can be changed
+// there later).
+const hdhrProfile = ref('auto');
+const HDHR_PROFILE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'auto', label: 'Auto (no transcode — raw broadcast stream)' },
+  { value: 'heavy', label: 'Heavy' },
+  { value: 'internet1080', label: '1080p' },
+  { value: 'internet720', label: '720p' },
+  { value: 'internet480-5000', label: '480p (5000 kbps)' },
+  { value: 'internet480', label: '480p' },
+  { value: 'mobile', label: 'Mobile' },
+];
 
 // Local Now (local mode): a city/market typeahead against the City/Search proxy + the chosen market that
 // gates the Add button. A Local playlist is created per market (POST /api/import/local).
@@ -249,8 +263,10 @@ async function create() {
           ? '/api/import/local'
           : '/api/import/m3u';
     const payload: Record<string, string> = { name: name.value.trim() };
-    if (mode.value === 'hdhr') payload.address = hdhrAddress.value.trim();
-    else if (mode.value === 'local') {
+    if (mode.value === 'hdhr') {
+      payload.address = hdhrAddress.value.trim();
+      payload.profile = hdhrProfile.value;
+    } else if (mode.value === 'local') {
       payload.dma = selectedMarket.value!.dma;
       payload.market = selectedMarket.value!.market;
       payload.label = selectedMarket.value!.label;
@@ -406,6 +422,20 @@ async function create() {
             <Btn variant="primary" icon="refresh" :disabled="busy || !hdhrAddress.trim()" @click="testHdhr">
               {{ busy ? 'Testing…' : 'Test' }}
             </Btn>
+          </div>
+          <div style="margin-top: 12px;">
+            <div class="field-lbl">Output profile</div>
+            <div class="select fill">
+              <select v-model="hdhrProfile">
+                <option v-for="opt in HDHR_PROFILE_OPTIONS" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+            </div>
+            <div class="muted" style="font-size: var(--fs-xs); margin-top: 6px;">
+              Anything besides Auto only works if this tuner supports onboard transcoding. You can change this
+              later from the playlist's settings.
+            </div>
           </div>
           <div v-if="hdhrInfo" style="margin-top: 12px; display: flex; flex-direction: column; gap: 8px;">
             <div class="row" style="flex-wrap: wrap; gap: 6px;">

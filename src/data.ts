@@ -55,6 +55,11 @@ export interface Playlist {
   // own logo instead of the channel's own logoUrl, wherever the guide has one. Set via PUT /api/playlists/:id
   // { useEpgLogo }. Absent on legacy rows (treat undefined as false).
   useEpgLogo?: boolean;
+  // HDHomeRun-only: the operator's chosen output profile (resolution/transcode) — 'auto' (raw broadcast,
+  // every device supports it) or one of the device's onboard-transcode profiles. Set via
+  // PUT /api/playlists/:id { hdhrProfile }, which triggers a resync so every channel's stream URL picks up
+  // the new profile. Absent/undefined on a non-HDHomeRun playlist.
+  hdhrProfile?: string;
 }
 export interface EpgSource {
   id: string; name: string; url: string; channels: number; programs: number;
