@@ -52,7 +52,8 @@ interface PlaylistLite {
 const sourceOrder = new Map(SOURCES.map((s, i) => [s.id, i]));
 
 // Resolve the operator domain (settings singleton, env-default fallback) — used to absolutize URL lines.
-async function resolveDomain(): Promise<string> {
+// Exported: routes/hdhomerunEmulation.ts needs the same absolutized domain for its discover/lineup URLs.
+export async function resolveDomain(): Promise<string> {
   const s = await Settings.findOne({ _id: SETTINGS_ID }, { domain: 1 }).lean();
   return (s?.domain ?? envDefaults().domain).replace(/\/+$/, '');
 }
@@ -174,6 +175,25 @@ async function ensureSlug(user: UserHydrated): Promise<string> {
       throw err;
     }
   }
+}
+
+// The Global-scoped Active channel set a user can see — admin sees the full union, else scoped to
+// allowedPlaylists — the SAME set their per-user Global .m3u serializes (writeUserGlobalFile below), reused
+// here for anything else that needs "this user's live channels" without writing a file to disk (HDHomeRun
+// tuner emulation, routes/hdhomerunEmulation.ts). A user with their stream token disabled sees none — no
+// playable tuner should be exposed for an account that can't stream.
+export async function channelsForUser(user: UserHydrated): Promise<PlaylistChannelDoc[]> {
+  if (!user.streamTokenEnabled) return [];
+  const gplaylists = (await Playlist.find(
+    { endpoint: 'global', state: true, source: { $ne: null } },
+    { id: 1, source: 1 },
+  ).lean()) as Array<{ id: string; source: string }>;
+  gplaylists.sort((a, b) => (sourceOrder.get(a.source) ?? 999) - (sourceOrder.get(b.source) ?? 999));
+  const visible =
+    user.role === 'admin' ? gplaylists : gplaylists.filter((p) => (user.allowedPlaylists ?? []).includes(p.id));
+  const channels: PlaylistChannelDoc[] = [];
+  for (const p of visible) channels.push(...(await activeChannels(p.source)));
+  return channels;
 }
 
 // Write (or prune) one user's Global file: their scoped view of the union (admin = full union), token baked.
