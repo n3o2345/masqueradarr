@@ -31,7 +31,8 @@ export interface PlaylistChannelDoc {
   //                        (origin ?? source) so a clone — whose `source` is its own clone id — still routes
   //                        through the real adapter at /api/v1/<origin>/…. See .claude/skills/m3u/SKILL.md.
   logoColor: string;
-  logoUrl: string | null;
+  logoUrl: string | null; // seeded from the source at sync; operator-overridable via the channel drawer
+  //                         (null reverts to the derived `stream.initials` tile — see ChannelLogo.vue).
   streamEntryUrl: string;
   // Failover group (operator-configured): one 'parent' + ordered 'child' backups per failoverGroupId.
   // Children mirror the parent's EPG identity, are hidden from exports, and serve as ordered play-time

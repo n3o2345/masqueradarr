@@ -250,10 +250,11 @@ async function upsertChannels(docs: SourceChannelDoc[]): Promise<void> {
 }
 
 // Upsert the editable PlaylistChannel store from the source docs, PRESERVING USER EDITS. Source-derived
-// volatile fields (logo, stream url, playability, derived initials/color) go in $set (refreshed every sync);
-// user-editable fields (status governor, name, group, channel#, channelNo, tvg_id, epg) go in $setOnInsert (written
-// once, never clobbered). The two never touch the same path. A vanished channel is pruned in syncLive (its
-// edits go with it — the channel is gone); a full reset (Restore Defaults) rebuilds from scratch.
+// volatile fields (stream url, playability, derived initials/color) go in $set (refreshed every sync);
+// user-editable fields (status governor, name, group, channel#, channelNo, tvg_id, epg, logoUrl) go in
+// $setOnInsert (written once, never clobbered). The two never touch the same path. A vanished channel is
+// pruned in syncLive (its edits go with it — the channel is gone); a full reset (Restore Defaults) rebuilds
+// from scratch.
 async function upsertPlaylistChannels(docs: SourceChannelDoc[]): Promise<void> {
   if (!docs.length) return;
   // Tombstone gate: a channel the operator hard-deleted (Playlist.deletedChannelIds) must NOT be re-inserted
@@ -274,7 +275,6 @@ async function upsertPlaylistChannels(docs: SourceChannelDoc[]): Promise<void> {
           $set: {
             source: pc.source,
             logoColor: pc.logoColor,
-            logoUrl: pc.logoUrl,
             streamEntryUrl: pc.streamEntryUrl,
             'stream.initials': pc.stream.initials,
             'stream.isPlayable': pc.stream.isPlayable,
@@ -289,6 +289,9 @@ async function upsertPlaylistChannels(docs: SourceChannelDoc[]): Promise<void> {
             epg: pc.epg,
             epgState: pc.epgState,
             status: pc.status,
+            // Operator-owned icon override — written-once from the source at seed, NEVER $set (survives
+            // re-sync); edited via PUT /api/playlists/:id/channels/:channelId, like failover/playerPref/tags.
+            logoUrl: pc.logoUrl,
             // Operator-owned failover group assignment — written-once null, NEVER $set (survives re-sync).
             failoverGroupId: pc.failoverGroupId,
             failoverRole: pc.failoverRole,

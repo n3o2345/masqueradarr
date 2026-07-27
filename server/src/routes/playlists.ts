@@ -664,14 +664,15 @@ playlistsRouter.get('/:id/programs', async (req: AuthRequest, res, next) => {
 
 // Update one channel's operator-editable fields: status (the 'Active'/'Disabled' enable governor),
 // tvg_name (rename), group (regroup), channelNo (displayed channel number), streamEntryUrl (the proxy
-// entry url, editable for non-builtin playlists), the 2-factor EPG link tvg_id (= epgchannels.channelId) +
-// epg (= epgchannels.source), and epgState (the SEPARATE match-status indicator 'matched'|'unmatched'|null).
+// entry url, editable for non-builtin playlists), logoUrl (operator-overridden icon; null reverts to the
+// synced/derived initials tile), the 2-factor EPG link tvg_id (= epgchannels.channelId) + epg
+// (= epgchannels.source), and epgState (the SEPARATE match-status indicator 'matched'|'unmatched'|null).
 // The channel drawer also persists live stream.* detail while open (realtime status, resolution, playability).
 // The (tvg_id, epg) pair maps 1:1 to one epgchannels doc — set BOTH together to link a channel to an EPG
 // source channel (typically alongside epgState:'matched'), or both null to unlink (epgState:'unmatched').
-// Source-derived fields (logo, stream url, playability, derived initials/color) are not editable here — they
-// refresh on sync. `channelId` is the deterministic _id ("<source>:<sourceChannelId>"); it must belong to
-// this playlist's source.
+// Other source-derived fields (stream url resolution, playability, derived initials/color) are not editable
+// here — they refresh on sync. `channelId` is the deterministic _id ("<source>:<sourceChannelId>"); it must
+// belong to this playlist's source.
 playlistsRouter.put('/:id/channels/:channelId', requireAdmin, async (req, res, next) => {
   try {
     const body = req.body ?? {};
@@ -690,8 +691,8 @@ playlistsRouter.put('/:id/channels/:channelId', requireAdmin, async (req, res, n
       $set.epgState = body.epgState;
     }
     // tvg_id + epg are the 2-factor EPG link (both string | null); set both to link, both null to unlink.
-    // channelNo (displayed channel number) and streamEntryUrl are also string | null user edits.
-    for (const key of ['tvg_name', 'group', 'channelNo', 'streamEntryUrl', 'tvg_id', 'epg'] as const) {
+    // channelNo (displayed channel number), streamEntryUrl, and logoUrl are also string | null user edits.
+    for (const key of ['tvg_name', 'group', 'channelNo', 'streamEntryUrl', 'logoUrl', 'tvg_id', 'epg'] as const) {
       if (body[key] !== undefined) {
         if (body[key] !== null && typeof body[key] !== 'string') {
           return res.status(400).json({ error: `${key} (string | null) required` });
@@ -747,7 +748,7 @@ playlistsRouter.put('/:id/channels/:channelId', requireAdmin, async (req, res, n
     if (!Object.keys($set).length) {
       return res.status(400).json({
         error:
-          'no editable fields provided (status, tvg_name, group, channelNo, streamEntryUrl, tvg_id, epg, epgState, playerPref, tags, stream.*)',
+          'no editable fields provided (status, tvg_name, group, channelNo, streamEntryUrl, logoUrl, tvg_id, epg, epgState, playerPref, tags, stream.*)',
       });
     }
     // Failover-group EPG authority: a CHILD mirrors its parent's EPG identity (services/failover.ts), so

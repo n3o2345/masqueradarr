@@ -30,6 +30,7 @@ const channelNo = ref(props.ch.channelNo ?? '');
 const group = ref(props.ch.group ?? '');
 const tvgId = ref(props.ch.tvg_id ?? '');
 const streamUrl = ref(props.ch.streamEntryUrl ?? '');
+const logoUrl = ref(props.ch.logoUrl ?? '');
 // DaddyLive-family sources (dlhd) expose several interchangeable upstream "players" per channel; the
 // picker below lets the operator prefer one for THIS channel (0 = Auto → inherit the source-wide default).
 const player = ref(props.ch.playerPref ?? 0);
@@ -84,6 +85,9 @@ function save() {
   if ((group.value || null) !== (props.ch.group ?? null)) patch.group = group.value || null;
   if (!builtin.value && (streamUrl.value || null) !== (props.ch.streamEntryUrl ?? null)) {
     patch.streamEntryUrl = streamUrl.value || null;
+  }
+  if ((logoUrl.value || null) !== (props.ch.logoUrl ?? null)) {
+    patch.logoUrl = logoUrl.value || null;
   }
   // Failover children never send EPG edits (locked field; the server would 409 them anyway).
   if (!isFailoverChild.value && (tvgId.value || null) !== (props.ch.tvg_id ?? null)) {
@@ -198,6 +202,7 @@ watch(
     group.value = props.ch.group ?? '';
     tvgId.value = props.ch.tvg_id ?? '';
     streamUrl.value = props.ch.streamEntryUrl ?? '';
+    logoUrl.value = props.ch.logoUrl ?? '';
     player.value = props.ch.playerPref ?? 0;
     tags.value = [...(props.ch.tags ?? [])];
     confirmRemove.value = false;
@@ -338,6 +343,20 @@ onBeforeUnmount(() => {
           <div class="form-row">
             <div class="field-lbl">Group</div>
             <GroupPicker v-model="group" :playlist-id="ch.source" allow-create />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="field-lbl">Logo</div>
+          <div class="row" style="gap: 10px; align-items: center;">
+            <ChannelLogo :ch="{ ...ch, logoUrl: logoUrl || null }" />
+            <div class="input" style="flex: 1;">
+              <Icon name="image" :size="14" />
+              <input v-model="logoUrl" placeholder="https://example.com/logo.png" />
+            </div>
+            <Btn v-if="logoUrl" variant="ghost" size="sm" title="Clear (fall back to initials)" @click="logoUrl = ''">
+              Clear
+            </Btn>
           </div>
         </div>
 

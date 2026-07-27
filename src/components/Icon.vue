@@ -143,5 +143,9 @@ defineProps<{ name: string; size?: number }>();
       <path d="M9 3v3"/><path d="M15 3v3"/><path d="M9 18v3"/><path d="M15 18v3"/>
       <path d="M3 9h3"/><path d="M3 15h3"/><path d="M18 9h3"/><path d="M18 15h3"/>
     </template>
+    <template v-else-if="name === 'image'">
+      <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
+      <path d="m21 15-5-5L5 21"/>
+    </template>
   </svg>
 </template>
