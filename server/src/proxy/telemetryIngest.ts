@@ -30,9 +30,11 @@ import { streamKey, noteSuccess, noteFailed, noteFailure } from '../sources/core
 //  · media    — manifest-declared decode metadata → noteMedia. Fields: { source, entryUrl, resolution?,
 //    codecs?, frameRate?, container? } (any subset; nulls mean "no update this poll").
 //  · open/sbytes/close — P3.2/DST continuous raw-TS: the SOCKET model (a single long-lived TS connection, no
-//    polling). `open` mints a socket connId (noteSocketViewerOpen) mapped from the Rust streamId; `sbytes`
-//    (periodic) → noteSocketBytes(connId); `close` → noteSocketViewerClose(connId). Fields: open = { streamId,
-//    source, entryUrl, ip, ua, username?, playerType }, sbytes = { streamId, bytes }, close = { streamId }.
+//    polling). `open` mints a socket connId (noteSocketViewerOpen) mapped from the Rust streamId AND is itself
+//    a 2xx-equivalent success → noteSuccess (→ live); `sbytes` (periodic) → noteSocketBytes(connId) + noteSuccess
+//    (keeps the channel live, same as the HLS `bytes` event); `close` → noteSocketViewerClose(connId). Fields:
+//    open = { streamId, source, entryUrl, ip, ua, username?, playerType }, sbytes = { streamId, bytes },
+//    close = { streamId }.
 // A body may be a single event or { events: [...] } (Rust batches, P3.1); both are accepted.
 
 interface TelemetryEvent {
@@ -116,12 +118,22 @@ function applyEvent(e: TelemetryEvent): void {
       tsConns.set(streamId, connId);
       const playerType: PlayerType = e.playerType === 'externalPlayer' ? 'externalPlayer' : 'appPlayer';
       noteSocketViewerOpen(source, entryUrl, ip, ua, username, playerType, connId);
+      // PHZ: the sidecar only mints a socket once it has a live upstream connection, so `open` is itself a
+      // 2xx-equivalent success → drive establishing→live. Without this, a Raw-TS channel never calls
+      // noteSuccess (viewer/bytes are HLS-only events) and phaseFor() falls through its "no attempts yet"
+      // branch forever, so the UI shows "establishing" for the whole session even while bytes are flowing.
+      noteSuccess(streamKey(source, entryUrl));
     }
   } else if (e.kind === 'sbytes') {
     // DST continuous-TS: periodic egress for a live socket session (keeps its rate + lastSeen fresh).
     const streamId = str(e.streamId);
     const connId = streamId ? tsConns.get(streamId) : undefined;
-    if (connId !== undefined && bytes) noteSocketBytes(connId, bytes);
+    if (connId !== undefined && bytes) {
+      noteSocketBytes(connId, bytes);
+      // PHZ: continued bytes on the socket are continued success — keep the channel live (mirrors the
+      // HLS 'bytes' branch above) rather than leaving phase to decay only via noteFailure/noteFailed.
+      if (source && entryUrl) noteSuccess(streamKey(source, entryUrl));
+    }
   } else if (e.kind === 'close') {
     // DST continuous-TS: the socket ended → close the session (persists a ViewSession) + drop the mapping.
     const streamId = str(e.streamId);
