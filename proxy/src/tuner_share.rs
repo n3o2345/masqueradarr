@@ -184,49 +184,63 @@ async fn pump(
 }
 
 /// Decrements the live viewer count when a viewer's Body is dropped (client disconnect, or the pump itself
-/// ending the stream). This is the ONLY place the count goes down, so the pump's idle countdown always
-/// reflects reality.
+/// ending the stream), flushes any residual byte count, and tells Node this socket session ended. This is
+/// the ONLY place the viewer count goes down, so the pump's idle countdown always reflects reality.
 struct ViewerGuard {
     viewers: Arc<AtomicUsize>,
-    ctx: TelemetryCtx,
+    state: crate::state::AppState,
+    stream_id: String,
     bytes: Arc<AtomicU64>,
 }
 
 impl Drop for ViewerGuard {
     fn drop(&mut self) {
         self.viewers.fetch_sub(1, Ordering::SeqCst);
-        let total = self.bytes.load(Ordering::Relaxed);
-        if total > 0 {
-            self.ctx.state.report(serde_json::json!({
-                "kind": "bytes", "source": self.ctx.source, "entryUrl": self.ctx.entry,
-                "ip": self.ctx.ip, "ua": self.ctx.ua, "username": self.ctx.username, "bytes": total,
-            }));
+        let residual = self.bytes.swap(0, Ordering::Relaxed);
+        if residual > 0 {
+            self.state.report(serde_json::json!({ "kind": "sbytes", "streamId": self.stream_id, "bytes": residual }));
         }
+        log::info("tuner", "", || format!("viewer session close ({})", self.stream_id));
+        self.state.report(serde_json::json!({ "kind": "close", "streamId": self.stream_id }));
     }
 }
 
-/// Build one viewer's axum Response: a Body over its own broadcast Receiver, counting delivered bytes and
-/// decrementing the shared viewer count when the Body is dropped (see ViewerGuard). Reports an immediate
-/// "viewer" telemetry event so Active Streams sees this viewer right away, same as the manifest/segment
-/// paths do for their own streams.
+/// Build one viewer's axum Response: a Body over its own broadcast Receiver. Reports telemetry using the
+/// SAME continuous-socket model tsmux.rs uses for raw-TS (open/sbytes/close) rather than the manifest-poll
+/// viewer/bytes model — HDHomeRun is a single long-lived connection per viewer, exactly what that model is
+/// for, and it's what actually drives Node's Active Streams / History for this shape of stream. Each
+/// attached viewer (whether it's the one that opened the real tuner or a later one just joining the
+/// broadcast) gets its OWN stream_id, so N viewers of one shared channel correctly show as N active-stream
+/// entries even though only one real upstream connection exists.
 fn viewer_response(
     rx: broadcast::Receiver<Chunk>,
     viewers: Arc<AtomicUsize>,
     content_type: String,
     ctx: TelemetryCtx,
 ) -> Response {
+    let stream_id = ctx.state.next_stream_id();
+    log::info("tuner", &ctx.rid, || format!("viewer session open ({stream_id}) for {}", ctx.entry));
     ctx.state.report(serde_json::json!({
-        "kind": "viewer", "source": ctx.source, "entryUrl": ctx.entry,
-        "ip": ctx.ip, "ua": ctx.ua, "username": ctx.username, "playerType": "hdhomerun-shared",
-        "bytes": 0u64,
+        "kind": "open", "streamId": stream_id, "source": ctx.source, "entryUrl": ctx.entry,
+        "ip": ctx.ip, "ua": ctx.ua, "username": ctx.username, "playerType": "externalPlayer",
     }));
     let bytes = Arc::new(AtomicU64::new(0));
-    let guard = ViewerGuard { viewers, ctx, bytes: bytes.clone() };
+    let mut last_flush = Instant::now();
+    let guard = ViewerGuard { viewers, state: ctx.state.clone(), stream_id: stream_id.clone(), bytes: bytes.clone() };
     let mapped = BroadcastStream::new(rx).filter_map(move |item| {
         let _keep_alive = &guard; // holds the guard for the stream's lifetime; dropped with the stream
         match item {
             Ok(Chunk::Data(b)) => {
                 bytes.fetch_add(b.len() as u64, Ordering::Relaxed);
+                // Periodic flush (same 1s cadence as tsmux.rs) so a long-lived view shows a smooth egress
+                // rate in History/Metrics instead of one giant burst reported at close.
+                if last_flush.elapsed() >= Duration::from_secs(1) {
+                    let pending = bytes.swap(0, Ordering::Relaxed);
+                    if pending > 0 {
+                        guard.state.report(serde_json::json!({ "kind": "sbytes", "streamId": stream_id, "bytes": pending }));
+                    }
+                    last_flush = Instant::now();
+                }
                 Some(Ok(b))
             }
             Ok(Chunk::Err(e)) => Some(Err(io::Error::other(e))),
