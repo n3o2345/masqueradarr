@@ -23,6 +23,12 @@ import { Schema, model } from 'mongoose';
 //                          (merged Node-side in the grant, so Rust needs no change).
 //   · readTimeoutMs      — idle/read timeout. LIVE (P3.1/RSL — enforced per-stream in the streaming loop).
 //   · bufferSizeKb       — bounded upstream→client buffer size. LIVE (P3.1/RSL — bounded mpsc read-ahead).
+//   · remoteBufferSizeKb — RBK: same buffer, applied instead of bufferSizeKb when the REQUESTING CLIENT's own
+//                          IP is public (not private/loopback/link-local) — i.e. a viewer reaching in through
+//                          a reverse proxy from off-LAN, who deals with more jitter than a same-network
+//                          viewer. null (default) = no override, every viewer gets bufferSizeKb as before.
+//                          Decided in Rust per-connection (proxy.rs, reusing is_private_host on the client ip
+//                          already threaded through for telemetry) — Node never sees the client's network.
 //   · outputFormat       — distribution shape: 'hls' (segmented) | 'ts' (continuous raw MPEG-TS on the ext
 //                          mount). LIVE (P3.2/DST); enc/fMP4/unreachable falls back to HLS, observable as the
 //                          `delivery` field on Active Streams.
@@ -45,6 +51,7 @@ export interface ProxyConfigDoc {
   connectTimeoutMs: number; // upstream connect-handshake timeout (ms). LIVE in P2.
   readTimeoutMs: number | null; // idle/read timeout (ms); null = none. LIVE (P3.1/RSL).
   bufferSizeKb: number | null; // bounded upstream→client read-ahead buffer (KiB); null = minimal pipeline. LIVE (P3.1/RSL).
+  remoteBufferSizeKb: number | null; // RBK: bufferSizeKb override for off-LAN clients; null = no override. LIVE.
   maxRedirects: number; // upstream redirect-follow cap. LIVE in P2.
   headerOverrides: Record<string, string>; // operator upstream-header overrides; merged into the grant. LIVE in P2.
   outputFormat: string; // distribution shape 'hls' (segmented) | 'ts' (continuous raw MPEG-TS, ext mount). LIVE (P3.2/DST); enc/fMP4→HLS.
@@ -63,6 +70,7 @@ const ProxyConfigSchema = new Schema<ProxyConfigDoc>(
     connectTimeoutMs: { type: Number, required: true, default: 15000 },
     readTimeoutMs: { type: Number, default: null },
     bufferSizeKb: { type: Number, default: 1024 }, // envDefaults() is the operative seed; kept in sync here
+    remoteBufferSizeKb: { type: Number, default: null },
     maxRedirects: { type: Number, required: true, default: 10 },
     headerOverrides: { type: Schema.Types.Mixed, default: {} },
     outputFormat: { type: String, required: true, default: 'hls' },

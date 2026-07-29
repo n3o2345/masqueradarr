@@ -47,6 +47,7 @@ export function envDefaults(): ProxyConfigData {
     connectTimeoutMs: envInt(process.env.PROXY_CONNECT_TIMEOUT_MS, 15000, 100, 120000),
     readTimeoutMs: null,
     bufferSizeKb: 1024,
+    remoteBufferSizeKb: null,
     maxRedirects: envInt(process.env.PROXY_MAX_REDIRECTS, 10, 0, 50),
     headerOverrides: {},
     outputFormat: 'hls',
@@ -65,6 +66,7 @@ export function toRuntimeProxyConfig(doc: ProxyConfigDoc): RuntimeProxyConfig {
     connectTimeoutMs: typeof doc.connectTimeoutMs === 'number' ? doc.connectTimeoutMs : d.connectTimeoutMs,
     readTimeoutMs: typeof doc.readTimeoutMs === 'number' ? doc.readTimeoutMs : null,
     bufferSizeKb: typeof doc.bufferSizeKb === 'number' ? doc.bufferSizeKb : null,
+    remoteBufferSizeKb: typeof doc.remoteBufferSizeKb === 'number' ? doc.remoteBufferSizeKb : null,
     maxRedirects: typeof doc.maxRedirects === 'number' ? doc.maxRedirects : d.maxRedirects,
     headerOverrides: sanitizeHeaderMap(doc.headerOverrides),
     outputFormat: OUTPUT_FORMATS.includes(doc.outputFormat as (typeof OUTPUT_FORMATS)[number]) ? doc.outputFormat : 'hls',
@@ -95,7 +97,7 @@ export type PatchResult =
 function patchNullableInt(
   $set: Partial<ProxyConfigData>,
   b: Record<string, unknown>,
-  key: 'readTimeoutMs' | 'bufferSizeKb' | 'segmentCacheTtlSec',
+  key: 'readTimeoutMs' | 'bufferSizeKb' | 'remoteBufferSizeKb' | 'segmentCacheTtlSec',
   min: number,
   max: number,
 ): string | null {
@@ -140,6 +142,7 @@ export function toExternalPatch(body: unknown): PatchResult {
     patchInt($set, b, 'maxRedirects', 0, 50),
     patchNullableInt($set, b, 'readTimeoutMs', 0, 600000),
     patchNullableInt($set, b, 'bufferSizeKb', 16, 1048576),
+    patchNullableInt($set, b, 'remoteBufferSizeKb', 16, 1048576),
     patchNullableInt($set, b, 'segmentCacheTtlSec', 0, 86400),
   ]) {
     if (err) return { ok: false, error: err };

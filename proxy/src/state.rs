@@ -143,6 +143,10 @@ pub struct SourcePolicy {
     /// behavior); buffer_size_kb is the bounded read-ahead buffer size (0 = disabled → the direct counted pipe).
     pub read_timeout_ms: AtomicU64,
     pub buffer_size_kb: AtomicU64,
+    /// RBK: buffer_size_kb override for a per-connection client whose own ip is public (not private/loopback/
+    /// link-local) — reusing is_private_host on the CLIENT ip (proxy.rs), never the upstream host. 0 = unset →
+    /// every viewer just gets buffer_size_kb (today's behavior, no divergence for a grant without this field).
+    pub remote_buffer_size_kb: AtomicU64,
     /// P3.2/DST: the distribution output format for this source's streams — "hls" (per-segment passthrough) or
     /// "ts" (continuous raw-TS, honored only on the /api/ext/v1 mount). RwLock<String> so a re-resolve can flip it.
     pub output_format: RwLock<String>,
@@ -170,6 +174,7 @@ impl SourcePolicy {
             max_redirects: AtomicU32::new(10),
             read_timeout_ms: AtomicU64::new(0),
             buffer_size_kb: AtomicU64::new(0),
+            remote_buffer_size_kb: AtomicU64::new(0),
             output_format: RwLock::new("hls".to_string()),
             stream_inf_redux: AtomicBool::new(false),
             failover_enabled: AtomicBool::new(true),
@@ -232,6 +237,11 @@ pub struct ProxyConfigWire {
     pub read_timeout_ms: Option<u64>,
     #[serde(rename = "bufferSizeKb", default)]
     pub buffer_size_kb: Option<u64>,
+    // RBK: bufferSizeKb override applied instead, per-connection, when the REQUESTING CLIENT's own ip is public
+    // (not private/loopback/link-local) — a viewer reaching in off-LAN through a reverse proxy. None = no
+    // override (every viewer gets buffer_size_kb, today's behavior). Decided in proxy.rs, never here.
+    #[serde(rename = "remoteBufferSizeKb", default)]
+    pub remote_buffer_size_kb: Option<u64>,
     #[serde(rename = "outputFormat", default = "default_output_format")]
     pub output_format: String,
     // SIR: STREAM-INF Redux flag. serde `default` → false for a grant from an older Node or an absent key, so
@@ -266,6 +276,7 @@ impl Default for ProxyConfigWire {
             max_redirects: default_max_redirects(),
             read_timeout_ms: None,
             buffer_size_kb: None,
+            remote_buffer_size_kb: None,
             output_format: default_output_format(),
             stream_inf_redux: false,
             failover_enabled: true,
@@ -554,6 +565,7 @@ impl AppState {
         // P3.1/RSL: the per-stream knobs (null → 0 → disabled). P3.2/DST: the output format.
         policy.read_timeout_ms.store(grant.proxy_config.read_timeout_ms.unwrap_or(0), Ordering::Relaxed);
         policy.buffer_size_kb.store(grant.proxy_config.buffer_size_kb.unwrap_or(0), Ordering::Relaxed);
+        policy.remote_buffer_size_kb.store(grant.proxy_config.remote_buffer_size_kb.unwrap_or(0), Ordering::Relaxed);
         *policy.output_format.write().unwrap() = grant.proxy_config.output_format.clone();
         // SIR: the opt-in master-reorder flag (proxy.rs gates it to the /api/ext/v1 mount).
         policy.stream_inf_redux.store(grant.proxy_config.stream_inf_redux, Ordering::Relaxed);

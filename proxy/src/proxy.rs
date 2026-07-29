@@ -261,7 +261,17 @@ pub async fn serve_stream(
 
     // RSL per-stream knobs (NOT client-level): idle/read timeout for stall detection + read-ahead buffer depth.
     let read_timeout_ms = policy.read_timeout_ms.load(Ordering::Relaxed);
-    let buffer_size_kb = policy.buffer_size_kb.load(Ordering::Relaxed);
+    // RBK: a client whose OWN ip is public (not private/loopback/link-local — i.e. reached in through a
+    // reverse proxy from off-LAN) gets remote_buffer_size_kb instead of buffer_size_kb, when the operator has
+    // set one. Same is_private_host() already used for the upstream-host SSRF check, just pointed at the
+    // viewer's ip instead. remote_buffer_size_kb == 0 (unset) → no divergence, every viewer gets buffer_size_kb
+    // exactly as before this knob existed.
+    let remote_buffer_size_kb = policy.remote_buffer_size_kb.load(Ordering::Relaxed);
+    let buffer_size_kb = if remote_buffer_size_kb > 0 && !is_private_host(&ip) {
+        remote_buffer_size_kb
+    } else {
+        policy.buffer_size_kb.load(Ordering::Relaxed)
+    };
 
     // Fetch upstream with RSL retry (transient transport error / 502/503/504 → bounded backoff; 4xx and other
     // definitive responses are used as-is). Client cached by (connect_timeout, max_redirects) — PXY-2; headers

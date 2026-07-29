@@ -13,6 +13,7 @@ export interface ProxyConfigState {
   connectTimeoutMs: number; // LIVE in P2 (Rust upstream client connect timeout)
   readTimeoutMs: number | null; // LIVE (P3.1/RSL — idle/read timeout enforced per-stream)
   bufferSizeKb: number | null; // LIVE (P3.1/RSL — bounded upstream→client read-ahead buffer)
+  remoteBufferSizeKb: number | null; // LIVE (RBK) — bufferSizeKb override for off-LAN viewers (reverse-proxied); null = no override
   maxRedirects: number; // LIVE in P2 (Rust upstream redirect cap)
   headerOverrides: Record<string, string>; // LIVE in P2 (merged into the grant's upstream headers)
   outputFormat: string; // LIVE (P3.2/DST) — 'hls' (segmented) | 'ts' (continuous raw MPEG-TS, ext mount); enc/fMP4→HLS
@@ -31,6 +32,7 @@ export function proxyConfigDefaults(): ProxyConfigState {
     connectTimeoutMs: 15000,
     readTimeoutMs: null,
     bufferSizeKb: 1024, // ≈16 read-ahead chunks (KiB/64); a real jitter buffer out of the box. Clearable → null (minimal).
+    remoteBufferSizeKb: null, // no override by default — every viewer gets bufferSizeKb regardless of network
     maxRedirects: 10,
     headerOverrides: {},
     outputFormat: 'hls',
@@ -49,6 +51,7 @@ function normalize(raw: unknown): ProxyConfigState {
     connectTimeoutMs: typeof s.connectTimeoutMs === 'number' ? s.connectTimeoutMs : d.connectTimeoutMs,
     readTimeoutMs: typeof s.readTimeoutMs === 'number' ? s.readTimeoutMs : null,
     bufferSizeKb: typeof s.bufferSizeKb === 'number' ? s.bufferSizeKb : null,
+    remoteBufferSizeKb: typeof s.remoteBufferSizeKb === 'number' ? s.remoteBufferSizeKb : null,
     maxRedirects: typeof s.maxRedirects === 'number' ? s.maxRedirects : d.maxRedirects,
     headerOverrides:
       s.headerOverrides && typeof s.headerOverrides === 'object' && !Array.isArray(s.headerOverrides)

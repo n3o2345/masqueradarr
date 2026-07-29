@@ -137,7 +137,11 @@ async function main() {
   const app = express();
   // The proxy attributes viewers/bandwidth by client ip — read the real client IP from X-Forwarded-For
   // when behind the Docker/edge reverse proxy. (The API already trusts its caller; no auth depends on it.)
-  app.set('trust proxy', true);
+  // Trust exactly ONE hop (the reverse proxy in front of this app), not an unbounded chain: `true` would
+  // trust every X-Forwarded-For entry a client cares to send, letting a remote viewer spoof req.ip and so
+  // spoof past any IP-based decision (GeoIP's "Local" label, the RBK remote-buffer split in proxy.rs, any
+  // future rate limiting). Bump past 1 if another proxy/load balancer sits in front of the reverse proxy.
+  app.set('trust proxy', 1);
   // The M3U import API accepts a whole playlist file in the JSON body — raise its limit BEFORE the default
   // parser (which would otherwise reject a multi-MB body at the 100kb default). The default parser then
   // no-ops on these requests (the body is already parsed), so every other endpoint keeps the tight limit.

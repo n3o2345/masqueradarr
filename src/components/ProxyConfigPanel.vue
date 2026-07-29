@@ -4,9 +4,9 @@
 //   · (Custom)   playlist drawer          → <ProxyConfigPanel :config-id="'app_' + playlist.id" flat />
 // Auto-saves every edit (no save button) via useProxyConfig(configId) — the useSettings hydrate-guard + 500 ms
 // debounce, scoped per config id. The knobs split into ACTIVE-NOW (applied by the Rust data plane today —
-// connect/read timeout, max redirects, buffer size, header overrides, and the output format incl. P3.2 raw-TS)
-// and RESERVED (persisted + shipped in the grant, applied when a later phase gains the capability — segment
-// cache). See src/composables/useProxyConfig.ts + .claude/plans/durable-iptv-proxy.md.
+// connect/read timeout, max redirects, buffer size + its off-LAN override, header overrides, and the output
+// format incl. P3.2 raw-TS) and RESERVED (persisted + shipped in the grant, applied when a later phase gains
+// the capability — segment cache). See src/composables/useProxyConfig.ts + .claude/plans/durable-iptv-proxy.md.
 
 import { ref, onMounted, watch } from 'vue';
 import Icon from './Icon.vue';
@@ -51,7 +51,7 @@ function setNum(field: 'connectTimeoutMs' | 'maxRedirects', raw: string) {
   const n = Math.round(Number(raw));
   if (Number.isFinite(n)) state[field] = n;
 }
-function setNullableNum(field: 'readTimeoutMs' | 'bufferSizeKb' | 'segmentCacheTtlSec', raw: string) {
+function setNullableNum(field: 'readTimeoutMs' | 'bufferSizeKb' | 'remoteBufferSizeKb' | 'segmentCacheTtlSec', raw: string) {
   const t = raw.trim();
   if (t === '') {
     state[field] = null;
@@ -65,7 +65,7 @@ function commitNum(field: 'connectTimeoutMs' | 'maxRedirects', min: number, max:
   state[field] = Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : min;
 }
 function commitNullableNum(
-  field: 'readTimeoutMs' | 'bufferSizeKb' | 'segmentCacheTtlSec',
+  field: 'readTimeoutMs' | 'bufferSizeKb' | 'remoteBufferSizeKb' | 'segmentCacheTtlSec',
   min: number,
   max: number,
 ) {
@@ -152,6 +152,19 @@ watch(
           <div class="muted" style="font-size: var(--fs-xs); margin-top: 6px;">
             Read-ahead buffer that absorbs brief upstream jitter. Allocated in ~64 KiB chunks — under ~128 KiB
             behaves minimal; ≈512 KiB+ (8+ chunks) is where it meaningfully helps. Blank = minimal pipeline.
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="field-lbl">Remote buffer size <span class="mono muted" style="font-weight: 400;">· KiB</span></div>
+          <div class="input">
+            <input type="number" min="16" :value="state.remoteBufferSizeKb ?? ''" placeholder="same as Buffer size"
+                   @input="setNullableNum('remoteBufferSizeKb', ($event.target as HTMLInputElement).value)"
+                   @blur="commitNullableNum('remoteBufferSizeKb', 16, 1048576)" />
+          </div>
+          <div class="muted" style="font-size: var(--fs-xs); margin-top: 6px;">
+            Buffer size used instead, only for a viewer whose own connection is off-LAN (reached in through a
+            reverse proxy) — extra cushion for the added latency/jitter of a WAN or mobile link. LAN viewers are
+            never affected. Blank = no override, everyone gets Buffer size.
           </div>
         </div>
       </div>
