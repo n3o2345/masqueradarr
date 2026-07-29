@@ -11,9 +11,10 @@
 //!
 //! Shape: one background pump per live channel drains the upstream `reqwest::Response` into a
 //! `tokio::sync::broadcast` channel; each attached viewer gets its own `Receiver` turned into an axum Body.
-//! The pump keeps the tuner open until IDLE_TIMEOUT after the LAST viewer detaches (see `idle_timeout()`),
-//! then closes the upstream connection and removes the map entry — freeing the tuner for a different channel
-//! and letting the next viewer of THIS channel open a fresh connection.
+//! The pump keeps the tuner open until its policy's `tuner_idle_secs` elapses after the LAST viewer detaches
+//! (the caller reads SourcePolicy::tuner_idle_secs and passes it into `start()`), then closes the upstream
+//! connection and removes the map entry — freeing the tuner for a different channel and letting the next
+//! viewer of THIS channel open a fresh connection.
 
 use axum::body::Body;
 use axum::http::StatusCode;
@@ -32,18 +33,12 @@ use tokio_stream::StreamExt;
 use crate::log;
 use crate::stream::TelemetryCtx;
 
-/// How long a shared tuner's upstream connection stays open with ZERO attached viewers before the pump
-/// gives up and releases it. Long enough that a quick channel-surf back (or an app reconnect) reuses the
-/// live tuner instead of paying a fresh HDHomeRun tune-in; short enough that a genuinely abandoned channel
-/// frees its tuner for other channels promptly. Overridable per-deployment for a very tight tuner budget.
-fn idle_timeout() -> Duration {
-    Duration::from_secs(
-        std::env::var("MASQ_TUNER_IDLE_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(20),
-    )
-}
+// TSH: how long a shared tuner's upstream connection stays open with ZERO attached viewers before the pump
+// gives up and releases it. Long enough that a quick channel-surf back (or an app reconnect) reuses the
+// live tuner instead of paying a fresh HDHomeRun tune-in; short enough that a genuinely abandoned channel
+// frees its tuner for other channels promptly. Now a real per-Default/Custom proxy-config knob
+// (SourcePolicy::tuner_idle_secs, resolved from the grant) — the caller (proxy.rs) reads it and passes it
+// into `start()`, so this module no longer reads the environment itself.
 
 // Depth of the broadcast channel's ring buffer (in chunks). A viewer who falls this far behind the fastest
 // consumer misses a `Lagged` gap (handled below) rather than blocking everyone else — generous enough that
@@ -110,6 +105,7 @@ impl TunerShare {
         resp: reqwest::Response,
         content_type: String,
         ctx: TelemetryCtx,
+        idle_secs: u64,
     ) -> Response {
         let mut live = self.live.lock().await;
         if let Some(existing) = live.get_mut(&key) {
@@ -130,13 +126,13 @@ impl TunerShare {
         );
         drop(live);
         log::info("tuner", &ctx.rid, || format!("opened new shared tuner upstream for {}", ctx.entry));
-        tokio::spawn(pump(self.clone(), key, resp, tx, viewers.clone()));
+        tokio::spawn(pump(self.clone(), key, resp, tx, viewers.clone(), Duration::from_secs(idle_secs)));
         viewer_response(rx, viewers, content_type, ctx)
     }
 }
 
 /// Drain the upstream into the broadcast channel until EOF/error, or until no viewer has been attached for
-/// `idle_timeout()` (checked once a second so a quiet-of-viewers channel is still torn down promptly even
+/// `idle` (checked once a second so a quiet-of-viewers channel is still torn down promptly even
 /// between data chunks). Removing the map entry on exit is what lets the NEXT viewer of this channel open a
 /// fresh tuner connection — the entire point of the idle timer.
 async fn pump(
@@ -145,10 +141,10 @@ async fn pump(
     resp: reqwest::Response,
     tx: broadcast::Sender<Chunk>,
     viewers: Arc<AtomicUsize>,
+    idle: Duration,
 ) {
     let mut stream = Box::pin(resp.bytes_stream());
     let mut zero_since: Option<Instant> = None;
-    let idle = idle_timeout();
     loop {
         let tick = tokio::time::sleep(Duration::from_secs(1));
         tokio::select! {

@@ -54,6 +54,7 @@ export function envDefaults(): ProxyConfigData {
     streamInfRedux: false,
     failoverEnabled: true, // group config is the real opt-in; ungrouped channels are unaffected either way
     failoverOnDefiniteError: false, // changes forward-verbatim 4xx/5xx semantics — explicit opt-in
+    tunerIdleSecs: envInt(process.env.MASQ_TUNER_IDLE_SECS, 20, 0, 3600),
     segmentCacheTtlSec: null,
   };
 }
@@ -73,6 +74,7 @@ export function toRuntimeProxyConfig(doc: ProxyConfigDoc): RuntimeProxyConfig {
     streamInfRedux: typeof doc.streamInfRedux === 'boolean' ? doc.streamInfRedux : false,
     failoverEnabled: typeof doc.failoverEnabled === 'boolean' ? doc.failoverEnabled : true,
     failoverOnDefiniteError: typeof doc.failoverOnDefiniteError === 'boolean' ? doc.failoverOnDefiniteError : false,
+    tunerIdleSecs: typeof doc.tunerIdleSecs === 'number' ? doc.tunerIdleSecs : d.tunerIdleSecs,
     segmentCacheTtlSec: typeof doc.segmentCacheTtlSec === 'number' ? doc.segmentCacheTtlSec : null,
   };
 }
@@ -118,7 +120,7 @@ function patchNullableInt(
 function patchInt(
   $set: Partial<ProxyConfigData>,
   b: Record<string, unknown>,
-  key: 'connectTimeoutMs' | 'maxRedirects',
+  key: 'connectTimeoutMs' | 'maxRedirects' | 'tunerIdleSecs',
   min: number,
   max: number,
 ): string | null {
@@ -140,6 +142,7 @@ export function toExternalPatch(body: unknown): PatchResult {
   for (const err of [
     patchInt($set, b, 'connectTimeoutMs', 100, 120000),
     patchInt($set, b, 'maxRedirects', 0, 50),
+    patchInt($set, b, 'tunerIdleSecs', 0, 3600),
     patchNullableInt($set, b, 'readTimeoutMs', 0, 600000),
     patchNullableInt($set, b, 'bufferSizeKb', 16, 1048576),
     patchNullableInt($set, b, 'remoteBufferSizeKb', 16, 1048576),

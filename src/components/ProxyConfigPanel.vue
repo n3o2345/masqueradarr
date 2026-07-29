@@ -47,7 +47,7 @@ function removeHeader(i: number) {
 //   · @blur   commits into [min, max] once typing stops (nullable knobs keep blank → null). The ranges
 //             mirror the server gate in server/src/proxyconfig/translate.ts, so the UI never persists a
 //             value the API would 400.
-function setNum(field: 'connectTimeoutMs' | 'maxRedirects', raw: string) {
+function setNum(field: 'connectTimeoutMs' | 'maxRedirects' | 'tunerIdleSecs', raw: string) {
   const n = Math.round(Number(raw));
   if (Number.isFinite(n)) state[field] = n;
 }
@@ -60,7 +60,7 @@ function setNullableNum(field: 'readTimeoutMs' | 'bufferSizeKb' | 'remoteBufferS
   const n = Math.round(Number(t));
   if (Number.isFinite(n)) state[field] = n;
 }
-function commitNum(field: 'connectTimeoutMs' | 'maxRedirects', min: number, max: number) {
+function commitNum(field: 'connectTimeoutMs' | 'maxRedirects' | 'tunerIdleSecs', min: number, max: number) {
   const v = state[field];
   state[field] = Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : min;
 }
@@ -220,6 +220,19 @@ watch(
           <div class="muted" style="font-size: var(--fs-xs); margin-top: 6px;">
             Also treat a definitive upstream error response (404 / 403 / 5xx — normally passed through to the
             player) as a failover trigger. Off keeps the long-standing pass-through behavior.
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="field-lbl">Tuner idle timeout <span class="mono muted" style="font-weight: 400;">· s</span></div>
+          <div class="input">
+            <input type="number" min="0" :value="state.tunerIdleSecs"
+                   @input="setNum('tunerIdleSecs', ($event.target as HTMLInputElement).value)"
+                   @blur="commitNum('tunerIdleSecs', 0, 3600)" />
+          </div>
+          <div class="muted" style="font-size: var(--fs-xs); margin-top: 6px;">
+            HDHomeRun only. How long a shared tuner stays open with no attached viewer before it's released —
+            long enough to survive a quick channel-surf-back, short enough to free the tuner for other
+            channels. Applies to new tuner opens; doesn't affect one already streaming.
           </div>
         </div>
       </div>

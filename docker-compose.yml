@@ -19,9 +19,11 @@ services:
       # internal port. Same public port + no other change; fully reversible by clearing it. See .env.example.
       MASQ_EDGE: ${MASQ_EDGE:-}
       # How long (seconds) a shared HDHomeRun tuner's upstream connection stays open with zero attached
-      # viewers before it's released — see proxy/src/tuner_share.rs idle_timeout(). MUST be listed here to
-      # reach the container: compose does NOT auto-forward arbitrary .env keys, only ones named in this
-      # block. Unset/empty = the sidecar's own default (20s).
+      # viewers before it's released — see proxy/src/tuner_share.rs. Now a real (Default)/(Custom) proxy-
+      # engine-settings knob (tunerIdleSecs, editable without a restart); this env var only seeds the
+      # (Default) row's out-of-box value on first boot (proxyconfig/translate.ts envDefaults). MUST still be
+      # listed here to reach the container: compose does NOT auto-forward arbitrary .env keys, only ones
+      # named in this block. Unset/empty = 20s.
       MASQ_TUNER_IDLE_SECS: ${MASQ_TUNER_IDLE_SECS:-}
     ports:
       - "${MASQUERADARR_PORT:-3000}:3000"

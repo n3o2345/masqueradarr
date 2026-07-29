@@ -563,7 +563,8 @@ pub async fn serve_stream(
     // of the same channel reuses it instead of opening a second tuner.
     if source == "hdhomerun" && !is_hop {
         let key = crate::tuner_share::share_key(source, &stream_entry);
-        return state.tuner_share.clone().start(key, resp, out_ct, ctx).await;
+        let tuner_idle_secs = policy.tuner_idle_secs.load(Ordering::Relaxed);
+        return state.tuner_share.clone().start(key, resp, out_ct, ctx, tuner_idle_secs).await;
     }
     Response::builder()
         .status(StatusCode::OK)

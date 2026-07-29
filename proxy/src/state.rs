@@ -161,6 +161,10 @@ pub struct SourcePolicy {
     /// FOG: also treat a DEFINITIVE upstream non-2xx (4xx/5xx — normally forwarded verbatim) as a failover
     /// trigger. Default OFF: it changes long-standing forward-verbatim semantics, so the operator opts in.
     pub failover_on_definite_error: AtomicBool,
+    /// TSH: shared HDHomeRun tuner idle-release delay (s), read by tuner_share.rs::start() at spawn time —
+    /// replaces the old MASQ_TUNER_IDLE_SECS-env-only global (still the (Default)'s out-of-box seed; see
+    /// proxyconfig/translate.ts envDefaults). 20 matches tuner_share.rs's original hardcoded value.
+    pub tuner_idle_secs: AtomicU64,
 }
 
 impl SourcePolicy {
@@ -179,6 +183,7 @@ impl SourcePolicy {
             stream_inf_redux: AtomicBool::new(false),
             failover_enabled: AtomicBool::new(true),
             failover_on_definite_error: AtomicBool::new(false),
+            tuner_idle_secs: AtomicU64::new(20),
         }
     }
 }
@@ -254,6 +259,11 @@ pub struct ProxyConfigWire {
     pub failover_enabled: bool,
     #[serde(rename = "failoverOnDefiniteError", default)]
     pub failover_on_definite_error: bool,
+    // TSH: shared HDHomeRun tuner idle-release delay (s) after the last viewer detaches. `default` (not
+    // Option) — an older Node/absent key degrades to the SAME 20s tuner_share.rs has always hardcoded, so a
+    // grant predating this knob changes nothing.
+    #[serde(rename = "tunerIdleSecs", default = "default_tuner_idle_secs")]
+    pub tuner_idle_secs: u64,
 }
 
 fn default_connect_ms() -> u64 {
@@ -268,6 +278,9 @@ fn default_output_format() -> String {
 fn default_true() -> bool {
     true
 }
+fn default_tuner_idle_secs() -> u64 {
+    20
+}
 
 impl Default for ProxyConfigWire {
     fn default() -> Self {
@@ -281,6 +294,7 @@ impl Default for ProxyConfigWire {
             stream_inf_redux: false,
             failover_enabled: true,
             failover_on_definite_error: false,
+            tuner_idle_secs: default_tuner_idle_secs(),
         }
     }
 }
@@ -574,6 +588,7 @@ impl AppState {
         policy
             .failover_on_definite_error
             .store(grant.proxy_config.failover_on_definite_error, Ordering::Relaxed);
+        policy.tuner_idle_secs.store(grant.proxy_config.tuner_idle_secs, Ordering::Relaxed);
         if let Ok(u) = Url::parse(&grant.target) {
             if let Some(h) = u.host_str() {
                 policy.hosts.write().unwrap().insert(h.to_lowercase());

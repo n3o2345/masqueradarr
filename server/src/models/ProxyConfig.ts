@@ -42,6 +42,11 @@ import { Schema, model } from 'mongoose';
 //   · failoverOnDefiniteError — also treat a DEFINITIVE upstream non-2xx (4xx/5xx, normally forwarded
 //                          verbatim) as a failover trigger. Default OFF — it changes long-standing
 //                          forward-verbatim semantics, so the operator opts in. LIVE.
+//   · tunerIdleSecs      — TSH: how long a shared HDHomeRun tuner's upstream stays open with zero attached
+//                          viewers before releasing it back (proxy/src/tuner_share.rs). Was env-var-only
+//                          (MASQ_TUNER_IDLE_SECS, container-restart to change); now a real per-Default/Custom
+//                          knob like every other one here — MASQ_TUNER_IDLE_SECS still seeds the (Default)'s
+//                          out-of-box value. LIVE.
 //   · segmentCacheTtlSec — segment cache TTL. RESERVED — the ONE knob still shipped but not yet applied.
 // The reserved knob is stored + surfaced + shipped in the grant but not yet applied — an explicit `null`
 // default marks a not-yet-wired numeric knob (the repo convention).
@@ -58,6 +63,7 @@ export interface ProxyConfigDoc {
   streamInfRedux: boolean; // SIR: opt-in HLS master reorder (ext mount) so the first #EXT-X-STREAM-INF fits a strict player's manifest probe window. LIVE; off = today's output.
   failoverEnabled: boolean; // play-time failover groups: walk the ordered children on an establish failure. Default ON (group config is the opt-in). LIVE.
   failoverOnDefiniteError: boolean; // also fail over on a definitive upstream 4xx/5xx (normally forwarded verbatim). Default OFF. LIVE.
+  tunerIdleSecs: number; // TSH: shared HDHomeRun tuner release delay after the last viewer detaches (s). LIVE.
   segmentCacheTtlSec: number | null; // segment cache TTL (s); null = no-store (today's behavior). RESERVED (only unapplied knob).
 }
 
@@ -77,6 +83,7 @@ const ProxyConfigSchema = new Schema<ProxyConfigDoc>(
     streamInfRedux: { type: Boolean, required: true, default: false },
     failoverEnabled: { type: Boolean, required: true, default: true },
     failoverOnDefiniteError: { type: Boolean, required: true, default: false },
+    tunerIdleSecs: { type: Number, required: true, default: 20 }, // envDefaults() is the operative seed; kept in sync here
     segmentCacheTtlSec: { type: Number, default: null },
   },
   { versionKey: false },

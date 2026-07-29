@@ -20,6 +20,7 @@ export interface ProxyConfigState {
   streamInfRedux: boolean; // LIVE (SIR) — opt-in HLS master reorder (ext mount) so the first #EXT-X-STREAM-INF fits a strict player's probe window
   failoverEnabled: boolean; // LIVE — play-time failover groups (walk the ordered children on an establish failure); default ON
   failoverOnDefiniteError: boolean; // LIVE — also fail over on a definitive upstream 4xx/5xx (normally forwarded verbatim); default OFF
+  tunerIdleSecs: number; // LIVE (TSH) — shared HDHomeRun tuner release delay after the last viewer detaches (s)
   segmentCacheTtlSec: number | null; // reserved (the only unapplied knob)
 }
 
@@ -39,6 +40,7 @@ export function proxyConfigDefaults(): ProxyConfigState {
     streamInfRedux: false,
     failoverEnabled: true,
     failoverOnDefiniteError: false,
+    tunerIdleSecs: 20,
     segmentCacheTtlSec: null,
   };
 }
@@ -62,6 +64,7 @@ function normalize(raw: unknown): ProxyConfigState {
     failoverEnabled: typeof s.failoverEnabled === 'boolean' ? s.failoverEnabled : true,
     failoverOnDefiniteError:
       typeof s.failoverOnDefiniteError === 'boolean' ? s.failoverOnDefiniteError : false,
+    tunerIdleSecs: typeof s.tunerIdleSecs === 'number' ? s.tunerIdleSecs : d.tunerIdleSecs,
     segmentCacheTtlSec: typeof s.segmentCacheTtlSec === 'number' ? s.segmentCacheTtlSec : null,
   };
 }
