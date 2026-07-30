@@ -13,6 +13,7 @@ use axum::body::Body;
 use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
+use bytes::Bytes;
 use percent_encoding::percent_decode_str;
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
@@ -545,8 +546,32 @@ pub async fn serve_stream(
             }
         });
     if method == Method::HEAD {
-        log::trace("proxy", &rid, || format!("HEAD segment → 200 {out_ct} (no body)"));
-        return raw(200, &out_ct, Vec::new());
+        // A HEAD response must mirror what the GET would send, minus the body. `raw(200, ct, Vec::new())`
+        // used to hand axum/hyper a genuinely empty (size-hint-0) body, which auto-fills Content-Length: 0 —
+        // correct for a real zero-byte resource, but a LIE for a live/continuous stream (HDHomeRun raw TS,
+        // and any other unbounded source) that has no fixed length at all. A player that HEAD-probes before
+        // committing to play (Chromium's own media pipeline, and several Electron-based IPTV clients that
+        // mask their UA as a plain browser) reads Content-Length: 0 as "this resource is empty" and aborts
+        // right there — it never issues the real GET, which is exactly the "loading failed" symptom with no
+        // corresponding GET in the proxy logs. Mirror the upstream's own Content-Length when it sent one (a
+        // real bounded VOD segment legitimately has a fixed size); otherwise send none at all, same as the
+        // GET response for this same resource would.
+        let upstream_len = resp.content_length();
+        log::trace("proxy", &rid, || {
+            format!(
+                "HEAD segment → 200 {out_ct} (no body{})",
+                upstream_len.map(|l| format!(", upstream len={l}")).unwrap_or_default()
+            )
+        });
+        let mut builder = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", &out_ct)
+            .header("cache-control", "no-store");
+        if let Some(len) = upstream_len {
+            builder = builder.header("content-length", len.to_string());
+        }
+        let empty = tokio_stream::empty::<Result<Bytes, std::io::Error>>();
+        return builder.body(Body::from_stream(empty)).unwrap();
     }
     log::trace("proxy", &rid, || format!("streaming segment as {out_ct} from {}", host_of(&fetch_url)));
     let ctx = TelemetryCtx {
