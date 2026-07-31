@@ -63,6 +63,19 @@ const { copyModal, copyFailed, copyPublishedUrl, copyModalEpg, closeCopyModal } 
                 </div>
                 <span class="muted font-xs">{{ group.epg.hint }}</span>
             </div>
+            <div v-if="showUrls" class="url-field">
+                <span class="url-field-label">HDHomeRun Tuner</span>
+                <div class="url-row">
+                    <div class="input mono url-input">
+                        <Icon name="link" :size="13" />
+                        <input readonly :value="group.hdhr.url" @focus="(e) => (e.target as HTMLInputElement).select()" />
+                    </div>
+                    <button class="action-btn" :title="`Copy ${group.hdhr.copyLabel} URL`" @click="copyPublishedUrl(group, 'hdhr')">
+                        <Icon name="copy" :size="13" />
+                    </button>
+                </div>
+                <span class="muted font-xs">{{ group.hdhr.hint }}</span>
+            </div>
         </div>
 
         <CopyConfirmModal

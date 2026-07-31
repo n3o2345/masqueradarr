@@ -12,7 +12,7 @@ export interface CopyModalState {
     title: string;
     copiedLabel: string; // human label of what was copied (e.g. "Global Playlist M3U")
     copiedUrl: string; // the value that landed on the clipboard
-    kind: 'm3u' | 'epg'; // gates the XMLTV note + the secondary EPG affordance
+    kind: 'm3u' | 'epg' | 'hdhr'; // gates the XMLTV note (m3u) / tuner note (hdhr) + the secondary EPG affordance
     epgUrl: string; // the SAME card's guide URL — only surfaced for kind === 'm3u'
     epgLabel: string;
 }
@@ -22,6 +22,13 @@ export const M3U_EPG_NOTE =
     'The XMLTV-EPG tag + URL is already included in this playlist. If your IPTV client player does not '
     + 'recognize the included XMLTV-EPG tag, then use the link below the playlist to manually add '
     + 'XMLTV-EPG as a source.';
+
+// The exact note rendered for HDHomeRun tuner copies. Plex/Emby/Jellyfin's manual tuner-address field wants
+// this base URL AS-IS (they append /discover.json themselves) — pasting the discover.json URL in breaks the
+// add. The guide/EPG URL below is a separate step in most players' Live TV setup, so it's offered here too.
+export const HDHR_TUNER_NOTE =
+    "Paste this exact address into the tuner's manual IP/network-address field — don't add /discover.json, "
+    + "the player appends that itself. The guide/EPG URL below is usually a separate step in Live TV setup.";
 
 // Robust copy that survives a non-secure context (plain http on a LAN IP): navigator.clipboard only exists in
 // secure contexts, so fall back to a hidden-textarea + execCommand('copy') when it's missing or rejects.
@@ -62,8 +69,8 @@ export function useCopyConfirm() {
     // Copy a published-URL row and open the confirmation modal. `kind` comes from the grouped data (m3u vs
     // epg), so the note is gated on data — never on string-matching a label. For an m3u row we thread the
     // SAME card's EPG URL through so the modal can offer it as a one-click follow-up.
-    async function copyPublishedUrl(group: PublishedGroup, kind: 'm3u' | 'epg') {
-        const row = kind === 'm3u' ? group.m3u : group.epg;
+    async function copyPublishedUrl(group: PublishedGroup, kind: 'm3u' | 'epg' | 'hdhr') {
+        const row = kind === 'm3u' ? group.m3u : kind === 'epg' ? group.epg : group.hdhr;
         const ok = await writeClipboard(row.url);
         copyFailed.value = !ok;
         copyModal.value = {

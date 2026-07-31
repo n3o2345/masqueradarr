@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import Icon from './Icon.vue';
 import Btn from './Btn.vue';
-import { M3U_EPG_NOTE, type CopyModalState } from '../composables/useCopyConfirm';
+import { M3U_EPG_NOTE, HDHR_TUNER_NOTE, type CopyModalState } from '../composables/useCopyConfirm';
 
 // Presentational copy-to-clipboard confirmation modal. Pure read-out: the open/close state and the copy
 // behavior live in useCopyConfirm — this component renders the current state and emits the two user actions
@@ -61,6 +61,27 @@ const emit = defineEmits<{
                     <div class="copy-note">
                         <Icon name="info" :size="13" />
                         <span>{{ M3U_EPG_NOTE }}</span>
+                    </div>
+                    <div class="copy-row">
+                        <div class="field-lbl">{{ modal.epgLabel }}</div>
+                        <div class="url-row">
+                            <div class="input mono copy-url">
+                                <Icon name="link" :size="13" />
+                                <input readonly :value="modal.epgUrl" @focus="(e) => (e.target as HTMLInputElement).select()" />
+                            </div>
+                            <button class="action-btn" :title="`Copy ${modal.epgLabel} URL`" @click="emit('copy-epg')">
+                                <Icon name="copy" :size="13" />
+                            </button>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- HDHR-only tuner-setup guidance + the same card's EPG/Guide URL, since Plex/Emby/Jellyfin need
+                     the tuner address AND the XMLTV guide added as two separate steps in Live TV setup. -->
+                <template v-if="modal.kind === 'hdhr'">
+                    <div class="copy-note">
+                        <Icon name="info" :size="13" />
+                        <span>{{ HDHR_TUNER_NOTE }}</span>
                     </div>
                     <div class="copy-row">
                         <div class="field-lbl">{{ modal.epgLabel }}</div>

@@ -33,6 +33,7 @@ export interface PublishedGroup {
     kind: 'Global' | 'Custom';
     m3u: PublishedRow;
     epg: PublishedRow;
+    hdhr: PublishedRow;
 }
 
 // Strip the trailing dotted filename segment of a pathname — the frontend twin of the server's
@@ -65,6 +66,18 @@ export function customGuideUrl(playlist: Playlist): string {
     }
     const customPath = normalizeEndpointPath(pathname) || 'unknown';
     return `${originBase()}/custom/${customPath}/epg/playlist.xml`;
+}
+
+// HDHomeRun tuner-emulation BASE URL (server/src/routes/hdhomerunEmulation.ts) — what a player like Plex's
+// "Live TV & DVR" manual tuner-address field wants. NOT the discover.json URL itself: Plex appends
+// /discover.json on its own, so pasting that suffix in breaks the add. Domain-rooted (not the playlist's own
+// custom `url` base) since the emulation router is mounted at root, keyed by slug (+customId for one Custom
+// playlist) rather than the playlist's own hosted path.
+export function globalHdhrUrl(user: PublishedUrlUser): string {
+    return `${originBase()}/hdhr/${user.slug}`;
+}
+export function customHdhrUrl(playlist: Playlist, user: PublishedUrlUser): string {
+    return `${originBase()}/hdhr/${user.slug}/custom/${playlist.id}`;
 }
 
 // The set of source ids that form the Global union (every endpoint:'global' source playlist).
@@ -104,6 +117,11 @@ export function buildPublishedGroups(user: PublishedUrlUser | null): PublishedGr
                 hint: 'Global, token-free guide URL — one URL works for every player.',
                 copyLabel: 'Global EPG Guide',
             },
+            hdhr: {
+                url: globalHdhrUrl(user),
+                hint: "HDHomeRun tuner address for Plex/Emby/Jellyfin Live TV setup — paste as-is, don't add /discover.json.",
+                copyLabel: 'Global HDHomeRun Tuner',
+            },
         });
     }
     // Then each allowed custom playlist, in the order it appears in the (non-Global) list.
@@ -122,6 +140,11 @@ export function buildPublishedGroups(user: PublishedUrlUser | null): PublishedGr
                 url: customGuideUrl(p),
                 hint: 'Token-free guide URL for this custom playlist.',
                 copyLabel: `${p.name} EPG Guide`,
+            },
+            hdhr: {
+                url: customHdhrUrl(p, user),
+                hint: "HDHomeRun tuner address for Plex/Emby/Jellyfin Live TV setup — paste as-is, don't add /discover.json.",
+                copyLabel: `${p.name} HDHomeRun Tuner`,
             },
         });
     }
