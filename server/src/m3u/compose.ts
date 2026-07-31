@@ -41,7 +41,7 @@ export interface ComposeResult {
 }
 
 // The minimal lean Playlist shape this module reads.
-interface PlaylistLite {
+export interface PlaylistLite {
   id: string;
   url: string;
   endpoint?: string;
@@ -83,7 +83,10 @@ async function activeChannels(source: string): Promise<PlaylistChannelDoc[]> {
 //      included (delegated to activeChannels()); a 'Disabled' channel is omitted.
 // channelSourceKey() resolves the PlaylistChannel `source` key (its id for a custom type, else its `source`);
 // a playlist with no usable key also yields [].
-async function playlistActiveChannels(playlist: PlaylistLite): Promise<PlaylistChannelDoc[]> {
+// Exported: routes/hdhomerunEmulation.ts reuses this same two-level gate to serve ONE Custom playlist's
+// channels through the HDHR tuner emulation (the Global-only channelsForUser below can't reach Custom
+// surfaces at all).
+export async function playlistActiveChannels(playlist: PlaylistLite): Promise<PlaylistChannelDoc[]> {
   if (playlist.state === false) return []; // (1) Inactive playlist → exclude its entire channel set
   const key = channelSourceKey(playlist);
   if (!key) return [];
@@ -226,6 +229,23 @@ export async function channelsForUser(user: UserHydrated): Promise<PlaylistChann
   const channels: PlaylistChannelDoc[] = [];
   for (const p of visible) channels.push(...(await activeChannels(p.source)));
   return channels;
+}
+
+// The Custom-playlist analogue of channelsForUser above — this user's Active channel set for ONE named
+// Custom playlist (e.g. "Satellite"), gated by the same admin || allowedCustomPlaylists.includes(id) rule
+// writeUserCustomFile uses. Returns null (distinct from an empty []) when the customId doesn't resolve to a
+// Custom-endpoint playlist at all, so the caller (routes/hdhomerunEmulation.ts) can 404 vs. legitimately
+// serve zero channels. Used by the HDHR tuner emulation's Custom-scoped routes.
+export async function channelsForUserCustom(
+  user: UserHydrated,
+  customId: string,
+): Promise<{ playlist: PlaylistLite; channels: PlaylistChannelDoc[] } | null> {
+  const playlist = (await Playlist.findOne({ id: customId, endpoint: 'custom' }).lean()) as PlaylistLite | null;
+  if (!playlist) return null;
+  if (!user.streamTokenEnabled) return { playlist, channels: [] };
+  const permitted = user.role === 'admin' || (user.allowedCustomPlaylists ?? []).includes(playlist.id);
+  if (!permitted) return { playlist, channels: [] };
+  return { playlist, channels: await playlistActiveChannels(playlist) };
 }
 
 // Write (or prune) one user's Global file: their scoped view of the union (admin = full union), token baked.
