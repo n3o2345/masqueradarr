@@ -38,6 +38,7 @@ const { copyModal, copyFailed, copyPublishedUrl, copyModalEpg, closeCopyModal } 
                     <th class="c-pl">Playlist</th>
                     <th class="c-url">M3U</th>
                     <th class="c-url">EPG / Guide</th>
+                    <th class="c-url">HDHomeRun Tuner</th>
                 </tr>
             </thead>
             <tbody v-for="r in rows" :key="r.id" class="user-block">
@@ -49,7 +50,7 @@ const { copyModal, copyFailed, copyPublishedUrl, copyModalEpg, closeCopyModal } 
                             <span class="uname" :title="r.username">{{ r.username }}</span>
                         </div>
                     </td>
-                    <td colspan="3" class="muted">No published playlists — assign access to generate URLs.</td>
+                    <td colspan="4" class="muted">No published playlists — assign access to generate URLs.</td>
                 </tr>
                 <tr v-for="(g, i) in r.groups" v-else :key="g.key">
                     <td v-if="i === 0" :rowspan="r.groups.length" class="c-user">
@@ -79,6 +80,14 @@ const { copyModal, copyFailed, copyPublishedUrl, copyModalEpg, closeCopyModal } 
                         <div class="url-cell">
                             <span class="url-mono" :title="g.epg.url">{{ g.epg.url }}</span>
                             <button class="action-btn" :title="`Copy ${g.epg.copyLabel}`" @click="copyPublishedUrl(g, 'epg')">
+                                <Icon name="copy" :size="12" />
+                            </button>
+                        </div>
+                    </td>
+                    <td class="c-url">
+                        <div class="url-cell">
+                            <span class="url-mono" :title="g.hdhr.url">{{ g.hdhr.url }}</span>
+                            <button class="action-btn" :title="`Copy ${g.hdhr.copyLabel}`" @click="copyPublishedUrl(g, 'hdhr')">
                                 <Icon name="copy" :size="12" />
                             </button>
                         </div>
@@ -133,9 +142,9 @@ const { copyModal, copyFailed, copyPublishedUrl, copyModalEpg, closeCopyModal } 
 }
 /* Percent widths + table-layout:fixed → columns scale with the modal and the table is always exactly the
    container width, so it never overflows into a horizontal scrollbar. Both URL columns share .c-url → equal. */
-.c-user { width: 25%; }
-.c-pl { width: 21%; }
-.c-url { width: 27%; }
+.c-user { width: 18%; }
+.c-pl { width: 16%; }
+.c-url { width: 22%; }
 .user-cell {
     display: flex;
     align-items: center;
