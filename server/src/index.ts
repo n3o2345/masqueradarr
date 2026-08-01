@@ -47,6 +47,7 @@ import { internalRouter } from './routes/internal.js';
 import { streamGate } from './middleware/streamGate.js';
 import { proxyRelay } from './proxy/relay.js';
 import { hdhomerunEmulationRouter } from './routes/hdhomerunEmulation.js';
+import { xtreamEmulationRouter } from './routes/xtreamEmulation.js';
 
 // Same-origin gate for the dulo login-stream WebSocket. Compares HOSTNAMES (ignoring port) so the Vite dev
 // proxy (localhost:5173 → localhost:3000) and the co-served prod SPA both pass, while a cross-site page is
@@ -245,6 +246,13 @@ async function main() {
   // files below: the /hdhr/<slug>/ path segment is the unguessable bearer, not a session. See
   // routes/hdhomerunEmulation.ts for the full design note.
   app.use(hdhomerunEmulationRouter);
+
+  // Xtream Codes API EMULATION (TiviMate/IPTV Smarters/GSE/Dispatcharr's "Xtream Codes API" input type, …).
+  // Root-mounted for the same reason as hdhomerunEmulationRouter above — its paths (/player_api.php,
+  // /panel_api.php, /get.php, /xmltv.php, /live/...) are not under /api, so the global authenticate
+  // middleware never touches it; the Xtream username/password IS the auth, verified per-request against the
+  // real account. See routes/xtreamEmulation.ts for the full design note.
+  app.use(xtreamEmulationRouter);
 
   // composeDir holds the m3u exports (decoupled from the SPA's publicDir). Files are PER-USER ONLY
   // (<username>-<slug>.m3u) under _global/m3u/ (Global) and custom/<customPath>/ (Custom), plus the EPG
