@@ -338,6 +338,19 @@ function setUseEpgLogo(v: boolean) {
   save({ useEpgLogo: v });
 }
 
+// Per-playlist Xtream Codes API toggle — only meaningful for a Custom-endpoint playlist (Global is always
+// reachable at the root /player_api.php, no toggle needed). No recompose needed on change — the server reads
+// the flag live, per request.
+const xtreamEnabled = ref(!!props.playlist.xtreamEnabled);
+function setXtreamEnabled(v: boolean) {
+  xtreamEnabled.value = v;
+  save({ xtreamEnabled: v });
+}
+// Xtream "Server URL" for this playlist's Custom scope — the account's own username/password (same as the
+// Web UI login) are entered separately in the client; this is deliberately just the base URL, not a full
+// login URL, since we never have the plaintext password to embed.
+const xtreamServerUrl = computed(() => `${baseDomain.value}/xc/${props.playlist.id}`);
+
 // HDHomeRun output profile (resolution/transcode) — only shown for an HDHomeRun playlist (isHdhr). 'auto' is
 // the raw broadcast stream every device supports; the rest only work on a tuner with onboard transcoding
 // hardware (a device without it will simply fail to sync/play at that profile). The server resyncs the
@@ -513,6 +526,34 @@ function onCustomPath(v: string) {
             <Toggle :on="useEpgLogo" @change="setUseEpgLogo" />
           </div>
         </div>
+
+        <template v-if="mode === 'custom'">
+          <div class="divider" />
+
+          <!-- Xtream Codes API — lets an Xtream-speaking client (TiviMate, IPTV Smarters, GSE, Dispatcharr's
+               Xtream input, …) connect directly to just this Custom playlist's channels, logging in with the
+               same account credentials used for the Web UI. Off by default; the URL below only becomes live
+               once this is on. -->
+          <div class="form-row">
+            <div class="row" style="align-items: center; gap: 10px;">
+              <div style="flex: 1;">
+                <div class="field-lbl" style="margin: 0;">Xtream Codes API</div>
+                <div class="muted" style="font-size: var(--fs-xs); margin-top: 2px;">
+                  {{ xtreamEnabled
+                    ? 'This playlist is reachable via Xtream login, using any account\u2019s own username/password.'
+                    : 'Turn on to make this playlist connectable as an Xtream Codes provider.' }}
+                </div>
+              </div>
+              <Toggle :on="xtreamEnabled" @change="setXtreamEnabled" />
+            </div>
+            <div v-if="xtreamEnabled" class="input mono" style="font-size: 12px; margin-top: 10px;">
+              <input readonly :value="xtreamServerUrl" @focus="(e) => (e.target as HTMLInputElement).select()" />
+            </div>
+            <div v-if="xtreamEnabled" class="muted" style="font-size: var(--fs-xs); margin-top: 4px;">
+              Server URL above — username and password are a Masqueradarr account's own login (must be permitted to view this playlist).
+            </div>
+          </div>
+        </template>
 
         <template v-if="isHdhr">
           <div class="divider" />

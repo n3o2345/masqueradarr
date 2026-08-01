@@ -3,10 +3,10 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { User, type UserDoc } from '../models/User.js';
 import { verifyPassword } from '../security/crypto.js';
-import { channelsForUser, resolveDomain } from '../m3u/compose.js';
+import { channelsForUser, channelsForUserCustom, resolveDomain } from '../m3u/compose.js';
 import { channelPlayUrl } from '../m3u/serialize.js';
 import { fetchProgramsGrouped } from '../epg/queryPrograms.js';
-import { GLOBAL_GUIDE_PATH, guideDiskPath } from '../epg/guidePaths.js';
+import { GLOBAL_GUIDE_PATH, customGuidePath, guideDiskPath } from '../epg/guidePaths.js';
 import type { PlaylistChannelDoc } from '../models/PlaylistChannel.js';
 import type { HydratedDocument } from 'mongoose';
 
@@ -15,9 +15,18 @@ import type { HydratedDocument } from 'mongoose';
 // own "Xtream Codes API" input type, …). This is the Xtream analogue of routes/hdhomerunEmulation.ts — same
 // "expose our composed channel set as a well-known API" idea, different wire protocol.
 //
-// SCOPE: Global only (channelsForUser), same starting scope hdhomerunEmulation.ts began with — a Custom-
-// playlist scope (?) could be added later the same way hdhomerunEmulation.ts later grew /hdhr/:slug/custom/:id.
-// No VOD/series library is emulated (Masqueradarr has none) — get_vod_*/get_series* actions report empty.
+// SCOPE: two scopes, mirroring routes/hdhomerunEmulation.ts:
+//   /player_api.php, /get.php, /xmltv.php, /live/...                 the Global union (channelsForUser).
+//   /xc/:customId/player_api.php, /xc/:customId/get.php, ...         ONE Custom playlist (channelsForUserCustom),
+//                                                                     e.g. "Satellite" — additionally gated by
+//                                                                     that playlist's own xtreamEnabled toggle
+//                                                                     (models/Playlist.ts), OFF by default. An
+//                                                                     operator opts a Custom playlist in via
+//                                                                     PUT /api/playlists/:id { xtreamEnabled }.
+//                                                                     :customId is the Playlist.id (same value
+//                                                                     the HDHR Custom scope's :customId is).
+// No VOD/series library is emulated in either scope (Masqueradarr has none) — get_vod_*/get_series* actions
+// report empty.
 //
 // AUTH MODEL: unlike the HDHR emulation (which reuses the slug-in-URL / streamToken bearer scheme because
 // HDHR clients can't do interactive login), Xtream clients always prompt for a username + password, so this
@@ -83,6 +92,30 @@ function liveEligible(ch: PlaylistChannelDoc): boolean {
 
 async function findLiveChannel(user: UserHydrated, streamId: number): Promise<PlaylistChannelDoc | null> {
   const channels = await channelsForUser(user);
+  return channels.find((ch) => liveEligible(ch) && streamIdFor(ch) === streamId) ?? null;
+}
+
+// Custom-playlist analogue of channelsForUser's role above: resolves ONE Custom playlist's channel set for
+// this user, gated by BOTH the playlist's own xtreamEnabled toggle (models/Playlist.ts — an operator
+// killswitch, off by default) and the usual admin || allowedCustomPlaylists membership check
+// (channelsForUserCustom's own gate). Returns null when the customId doesn't resolve to a Custom playlist AT
+// ALL, or that playlist has xtreamEnabled !== true — the two cases are indistinguishable to the caller by
+// design, same as an unknown vs. a not-yet-configured route. A real, XC-enabled Custom playlist the user
+// isn't permitted to see returns an EMPTY array (channelsForUserCustom's own membership gate), not null —
+// mirrors how the HDHR Custom scope's lineup.json behaves for the same case.
+async function resolveCustomChannels(user: UserHydrated, customId: string): Promise<PlaylistChannelDoc[] | null> {
+  const resolved = await channelsForUserCustom(user, customId);
+  if (!resolved || resolved.playlist.xtreamEnabled !== true) return null;
+  return resolved.channels;
+}
+
+async function findCustomLiveChannel(
+  user: UserHydrated,
+  customId: string,
+  streamId: number,
+): Promise<PlaylistChannelDoc | null> {
+  const channels = await resolveCustomChannels(user, customId);
+  if (!channels) return null;
   return channels.find((ch) => liveEligible(ch) && streamIdFor(ch) === streamId) ?? null;
 }
 
@@ -207,35 +240,80 @@ async function shortEpgFor(ch: PlaylistChannelDoc, limit: number): Promise<Array
   }));
 }
 
-// ---------------------------------------------------------------------------
-// player_api.php / panel_api.php — GET (query string) and POST (JSON or form) both accepted; real clients
-// use either depending on version. No `action` = the login/handshake call (user_info + server_info only).
-// ---------------------------------------------------------------------------
+// Builds the Xtream-flavored M3U body for either scope — `liveBase` is the scope's /live path prefix
+// ('/live' for Global, '/xc/:customId/live' for Custom) so the emitted URLs land back on the right scope.
+function buildM3u(
+  channels: PlaylistChannelDoc[],
+  domain: string,
+  username: string,
+  password: string,
+  liveBase: string,
+): string {
+  const lines: string[] = ['#EXTM3U'];
+  for (const ch of channels) {
+    const attrs: string[] = [];
+    if (ch.tvg_id != null && ch.epg != null) attrs.push(`tvg-id="${clean(ch.tvg_id)}"`);
+    attrs.push(`tvg-name="${clean(ch.tvg_name)}"`);
+    if (ch.logoUrl != null) attrs.push(`tvg-logo="${clean(ch.logoUrl)}"`);
+    attrs.push(`group-title="${clean(ch.group ?? '')}"`);
+    const url = `${domain}${liveBase}/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamIdFor(ch)}.ts`;
+    lines.push(`#EXTINF:-1 ${attrs.join(' ')},${clean(ch.tvg_name)}`);
+    lines.push(url);
+  }
+  return lines.join('\n') + '\n';
+}
 
-async function handlePlayerApi(req: express.Request, res: express.Response): Promise<void> {
-  const params: Record<string, unknown> = { ...req.query, ...(typeof req.body === 'object' && req.body ? req.body : {}) };
-  const user = await userByCreds(params.username, params.password);
-  if (!user) {
-    // Xtream convention: a failed login is a 200 with auth:0, not an HTTP error — clients key off this field.
-    res.json({ user_info: { auth: 0 }, server_info: {} });
+async function sendGuide(res: express.Response, servedPath: string): Promise<void> {
+  try {
+    const xml = await readFile(guideDiskPath(servedPath));
+    res.type('application/xml').send(xml);
+  } catch {
+    res.type('application/xml').send('<?xml version="1.0" encoding="UTF-8"?><tv></tv>');
+  }
+}
+
+// Strips whatever extension the client appended (.ts, .m3u8, .m4a, …) — Xtream clients pick it themselves
+// and expect the server to honor whichever one they chose, so it's accepted and ignored either way.
+function parseStreamId(raw: string): number | null {
+  const n = Number(raw.replace(/\.[a-zA-Z0-9]+$/, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+async function redirectToStream(res: express.Response, ch: PlaylistChannelDoc | null, token?: string): Promise<void> {
+  if (!ch) {
+    res.status(404).type('text/plain').send('Unknown stream');
     return;
   }
   const domain = await resolveDomain();
-  const nowSec = Math.floor(Date.now() / 1000);
-  const action = typeof params.action === 'string' ? params.action : '';
-
-  if (!action) {
-    res.json({ user_info: buildUserInfo(user, params.password as string), server_info: buildServerInfo(domain, nowSec) });
+  const url = channelPlayUrl(ch, domain, token);
+  if (!url) {
+    res.status(404).type('text/plain').send('Stream unavailable');
     return;
   }
+  res.redirect(302, url);
+}
 
+// ---------------------------------------------------------------------------
+// player_api.php / panel_api.php — GET (query string) and POST (JSON or form) both accepted; real clients
+// use either depending on version. No `action` = the login/handshake call (user_info + server_info only).
+// Shared between the Global scope (channels = channelsForUser) and each Custom scope (channels =
+// resolveCustomChannels) below — the action set and payload shapes are identical either way, only which
+// channels are visible differs.
+// ---------------------------------------------------------------------------
+
+async function respondToAction(
+  res: express.Response,
+  action: string,
+  params: Record<string, unknown>,
+  fetchChannels: () => Promise<PlaylistChannelDoc[]>,
+): Promise<void> {
   switch (action) {
     case 'get_live_categories':
-      res.json(buildCategories(await channelsForUser(user)));
+      res.json(buildCategories(await fetchChannels()));
       return;
     case 'get_live_streams': {
       const categoryId = typeof params.category_id === 'string' ? params.category_id : undefined;
-      res.json(buildLiveStreams(await channelsForUser(user), categoryId));
+      res.json(buildLiveStreams(await fetchChannels(), categoryId));
       return;
     }
     case 'get_vod_categories':
@@ -250,13 +328,42 @@ async function handlePlayerApi(req: express.Request, res: express.Response): Pro
     case 'get_simple_data_table': {
       const streamId = Number(params.stream_id);
       const limit = action === 'get_short_epg' ? Number(params.limit) || 4 : 200;
-      const ch = Number.isFinite(streamId) ? await findLiveChannel(user, streamId) : null;
+      let ch: PlaylistChannelDoc | null = null;
+      if (Number.isFinite(streamId)) {
+        const channels = await fetchChannels();
+        ch = channels.find((c) => liveEligible(c) && streamIdFor(c) === streamId) ?? null;
+      }
       res.json({ epg_listings: ch ? await shortEpgFor(ch, limit) : [] });
       return;
     }
     default:
       res.json({});
   }
+}
+
+function mergedParams(req: express.Request): Record<string, unknown> {
+  return { ...req.query, ...(typeof req.body === 'object' && req.body ? req.body : {}) };
+}
+
+// ── Global scope ─────────────────────────────────────────────────────────────
+
+async function handlePlayerApi(req: express.Request, res: express.Response): Promise<void> {
+  const params = mergedParams(req);
+  const user = await userByCreds(params.username, params.password);
+  if (!user) {
+    // Xtream convention: a failed login is a 200 with auth:0, not an HTTP error — clients key off this field.
+    res.json({ user_info: { auth: 0 }, server_info: {} });
+    return;
+  }
+  const domain = await resolveDomain();
+  const nowSec = Math.floor(Date.now() / 1000);
+  const action = typeof params.action === 'string' ? params.action : '';
+
+  if (!action) {
+    res.json({ user_info: buildUserInfo(user, params.password as string), server_info: buildServerInfo(domain, nowSec) });
+    return;
+  }
+  await respondToAction(res, action, params, () => channelsForUser(user));
 }
 
 xtreamEmulationRouter.get('/player_api.php', handlePlayerApi);
@@ -280,18 +387,7 @@ xtreamEmulationRouter.get('/get.php', async (req, res) => {
   }
   const domain = await resolveDomain();
   const channels = (await channelsForUser(user)).filter(liveEligible);
-  const lines: string[] = ['#EXTM3U'];
-  for (const ch of channels) {
-    const attrs: string[] = [];
-    if (ch.tvg_id != null && ch.epg != null) attrs.push(`tvg-id="${clean(ch.tvg_id)}"`);
-    attrs.push(`tvg-name="${clean(ch.tvg_name)}"`);
-    if (ch.logoUrl != null) attrs.push(`tvg-logo="${clean(ch.logoUrl)}"`);
-    attrs.push(`group-title="${clean(ch.group ?? '')}"`);
-    const url = `${domain}/live/${encodeURIComponent(username as string)}/${encodeURIComponent(password as string)}/${streamIdFor(ch)}.ts`;
-    lines.push(`#EXTINF:-1 ${attrs.join(' ')},${clean(ch.tvg_name)}`);
-    lines.push(url);
-  }
-  res.type('audio/mpegurl').send(lines.join('\n') + '\n');
+  res.type('audio/mpegurl').send(buildM3u(channels, domain, username as string, password as string, '/live'));
 });
 
 // ---------------------------------------------------------------------------
@@ -306,12 +402,7 @@ xtreamEmulationRouter.get('/xmltv.php', async (req, res) => {
     res.status(401).type('text/plain').send('Invalid credentials');
     return;
   }
-  try {
-    const xml = await readFile(guideDiskPath(GLOBAL_GUIDE_PATH));
-    res.type('application/xml').send(xml);
-  } catch {
-    res.type('application/xml').send('<?xml version="1.0" encoding="UTF-8"?><tv></tv>');
-  }
+  await sendGuide(res, GLOBAL_GUIDE_PATH);
 });
 
 // ---------------------------------------------------------------------------
@@ -327,22 +418,89 @@ xtreamEmulationRouter.get('/live/:username/:password/:streamId', async (req, res
     res.status(401).type('text/plain').send('Invalid credentials');
     return;
   }
-  const idStr = req.params.streamId.replace(/\.[a-zA-Z0-9]+$/, '');
-  const streamId = Number(idStr);
-  if (!Number.isFinite(streamId)) {
-    res.status(404).type('text/plain').send('Unknown stream');
+  const streamId = parseStreamId(req.params.streamId);
+  const ch = streamId != null ? await findLiveChannel(user, streamId) : null;
+  await redirectToStream(res, ch, user.streamToken);
+});
+
+// ---------------------------------------------------------------------------
+// Custom-playlist scope: /xc/:customId/... — mirrors every route above, but scoped to ONE Custom playlist via
+// resolveCustomChannels (both that playlist's xtreamEnabled toggle AND the requesting user's
+// allowedCustomPlaylists membership must hold). :customId is the Playlist.id — the same value shown in that
+// playlist's own "HOSTED AT" URL / admin UI, and the same id the HDHR Custom scope's :customId is.
+// ---------------------------------------------------------------------------
+
+async function handleCustomPlayerApi(req: express.Request, res: express.Response): Promise<void> {
+  const customId = String(req.params.customId);
+  const params = mergedParams(req);
+  const user = await userByCreds(params.username, params.password);
+  if (!user) {
+    res.json({ user_info: { auth: 0 }, server_info: {} });
     return;
   }
-  const ch = await findLiveChannel(user, streamId);
-  if (!ch) {
-    res.status(404).type('text/plain').send('Unknown stream');
+  const channels = await resolveCustomChannels(user, customId);
+  if (!channels) {
+    // Unknown Custom playlist OR xtreamEnabled is off for it — same generic failure as bad credentials,
+    // so this endpoint never reveals whether a disabled/nonexistent id exists.
+    res.json({ user_info: { auth: 0 }, server_info: {} });
     return;
   }
   const domain = await resolveDomain();
-  const url = channelPlayUrl(ch, domain, user.streamToken);
-  if (!url) {
-    res.status(404).type('text/plain').send('Stream unavailable');
+  const nowSec = Math.floor(Date.now() / 1000);
+  const action = typeof params.action === 'string' ? params.action : '';
+
+  if (!action) {
+    res.json({ user_info: buildUserInfo(user, params.password as string), server_info: buildServerInfo(domain, nowSec) });
     return;
   }
-  res.redirect(302, url);
+  await respondToAction(res, action, params, async () => channels);
+}
+
+xtreamEmulationRouter.get('/xc/:customId/player_api.php', handleCustomPlayerApi);
+xtreamEmulationRouter.get('/xc/:customId/panel_api.php', handleCustomPlayerApi);
+xtreamEmulationRouter.post('/xc/:customId/player_api.php', express.urlencoded({ extended: false }), handleCustomPlayerApi);
+xtreamEmulationRouter.post('/xc/:customId/panel_api.php', express.urlencoded({ extended: false }), handleCustomPlayerApi);
+
+xtreamEmulationRouter.get('/xc/:customId/get.php', async (req, res) => {
+  const { username, password } = req.query;
+  const user = await userByCreds(username, password);
+  if (!user) {
+    res.status(401).type('text/plain').send('Invalid credentials');
+    return;
+  }
+  const channels = await resolveCustomChannels(user, req.params.customId);
+  if (!channels) {
+    res.status(404).type('text/plain').send('Unknown playlist');
+    return;
+  }
+  const domain = await resolveDomain();
+  const base = `/xc/${req.params.customId}/live`;
+  res
+    .type('audio/mpegurl')
+    .send(buildM3u(channels.filter(liveEligible), domain, username as string, password as string, base));
+});
+
+xtreamEmulationRouter.get('/xc/:customId/xmltv.php', async (req, res) => {
+  const user = await userByCreds(req.query.username, req.query.password);
+  if (!user) {
+    res.status(401).type('text/plain').send('Invalid credentials');
+    return;
+  }
+  const resolved = await channelsForUserCustom(user, req.params.customId);
+  if (!resolved || resolved.playlist.xtreamEnabled !== true) {
+    res.status(404).type('text/plain').send('Unknown playlist');
+    return;
+  }
+  await sendGuide(res, customGuidePath(resolved.playlist.url));
+});
+
+xtreamEmulationRouter.get('/xc/:customId/live/:username/:password/:streamId', async (req, res) => {
+  const user = await userByCreds(req.params.username, req.params.password);
+  if (!user) {
+    res.status(401).type('text/plain').send('Invalid credentials');
+    return;
+  }
+  const streamId = parseStreamId(req.params.streamId);
+  const ch = streamId != null ? await findCustomLiveChannel(user, req.params.customId, streamId) : null;
+  await redirectToStream(res, ch, user.streamToken);
 });

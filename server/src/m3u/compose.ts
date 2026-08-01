@@ -48,6 +48,9 @@ export interface PlaylistLite {
   state?: boolean;
   source?: string | null;
   useEpgLogo?: boolean;
+  // Per-playlist Xtream Codes API toggle — read by routes/xtreamEmulation.ts's Custom-scoped routes via the
+  // `playlist` this function already returns, rather than a second query.
+  xtreamEnabled?: boolean;
 }
 
 // Registry order index for the cross-source Global union (then group → tvg_name within each source).

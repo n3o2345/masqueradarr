@@ -284,6 +284,15 @@ playlistsRouter.put('/:id', requireAdmin, async (req, res, next) => {
       }
       $set.useEpgLogo = body.useEpgLogo;
     }
+    // Per-playlist Xtream Codes API toggle (routes/xtreamEmulation.ts's /xc/:customId/... scope). No
+    // recompose/resync needed on change — it's read live, per-request, by the Xtream router, not baked into
+    // any exported file.
+    if (body.xtreamEnabled !== undefined) {
+      if (typeof body.xtreamEnabled !== 'boolean') {
+        return res.status(400).json({ error: 'xtreamEnabled (boolean) required' });
+      }
+      $set.xtreamEnabled = body.xtreamEnabled;
+    }
     // HDHomeRun output profile (resolution/transcode) — only meaningful on an hdhomerun-type playlist; baked
     // into each channel's streamEntryUrl by a resync (triggered below on an actual change). An invalid value,
     // or setting it on a non-HDHomeRun playlist, is a 400 rather than a silent no-op.
@@ -297,7 +306,7 @@ playlistsRouter.put('/:id', requireAdmin, async (req, res, next) => {
     if (!Object.keys($set).length) {
       return res.status(400).json({
         error:
-          'no editable fields provided (name, state, pinned, endpoint, url, interval, auto, tags, applyTagsToChannels, useEpgLogo, hdhrProfile)',
+          'no editable fields provided (name, state, pinned, endpoint, url, interval, auto, tags, applyTagsToChannels, useEpgLogo, xtreamEnabled, hdhrProfile)',
       });
     }
 

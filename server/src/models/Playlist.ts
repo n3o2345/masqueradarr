@@ -105,6 +105,13 @@ const PlaylistSchema = new Schema(
     // source) carries a better one. Falls back to logoUrl when the guide has no icon for that channel. User-owned
     // — a sync never writes it. See m3u/compose.ts buildLogoOverrides + m3u/serialize.ts channelToExtinf.
     useEpgLogo: { type: Boolean, default: false },
+    // Per-(Custom-)playlist toggle for the Xtream Codes API surface (routes/xtreamEmulation.ts's
+    // /xc/:customId/... scope). Off by default — an operator must explicitly opt a Custom playlist in before
+    // it's reachable via Xtream login at all, independent of a user's allowedCustomPlaylists grant (both must
+    // hold: this flag true AND the requesting user permitted). Meaningless for a Global-endpoint playlist —
+    // the root-mounted /player_api.php etc. already serve the Global scope account-wide with no such gate,
+    // mirroring how the Global .m3u export has never needed one. User-owned — a sync never writes it.
+    xtreamEnabled: { type: Boolean, default: false },
   },
   { versionKey: false },
 );
