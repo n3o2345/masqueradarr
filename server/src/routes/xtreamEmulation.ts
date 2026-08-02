@@ -1,14 +1,22 @@
 import express, { Router } from 'express';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { User, type UserDoc } from '../models/User.js';
 import { verifyPassword } from '../security/crypto.js';
 import { channelsForUser, channelsForUserCustom, resolveDomain } from '../m3u/compose.js';
 import { channelPlayUrl } from '../m3u/serialize.js';
 import { fetchProgramsGrouped } from '../epg/queryPrograms.js';
 import { GLOBAL_GUIDE_PATH, customGuidePath, guideDiskPath } from '../epg/guidePaths.js';
+import { loadConfig } from '../config.js';
+import { logger } from '../sources/core/logger.js';
 import type { PlaylistChannelDoc } from '../models/PlaylistChannel.js';
 import type { HydratedDocument } from 'mongoose';
+
+// Internal Node port (same resolution index.ts uses) — /live/... pipes the stream through a LOOPBACK fetch
+// of the normal /api/ext/v1/... proxy URL rather than 302-redirecting the client to it (see serveStream
+// below for why). Read once at module load; loadConfig() does a small synchronous file read, not per-request.
+const NODE_PORT = loadConfig().port;
 
 // XTREAM CODES API EMULATION — makes Masqueradarr addable as an Xtream Codes ("Xtream Login") IPTV provider
 // by anything that speaks that protocol (TiviMate, IPTV Smarters, GSE Smart IPTV, Perfect Player, Dispatcharr's
@@ -279,18 +287,62 @@ function parseStreamId(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-async function redirectToStream(res: express.Response, ch: PlaylistChannelDoc | null, token?: string): Promise<void> {
+// Serves the stream directly rather than 302-redirecting the client to /api/ext/v1/... — confirmed necessary
+// for at least one real client (iMPlayer): it loads the channel list from player_api.php fine (that's just
+// JSON) but never starts playback, because it doesn't follow a redirect on the actual video request. Not an
+// uncommon limitation among simpler Xtream players, so this pipes bytes through unconditionally rather than
+// relying on client redirect support.
+//
+// Implementation: a LOOPBACK fetch of the exact same /api/ext/v1/... URL the redirect used to point at
+// (127.0.0.1:NODE_PORT, bypassing the public reverse proxy for this internal hop), then stream the response
+// straight through — same status/header-forwarding + body-piping shape as proxy/relay.ts's Node→sidecar
+// relay, just one level up the chain (client→Node→[Node loopback]→sidecar instead of client→sidecar
+// directly). This keeps the streamGate/authenticate token check exactly as-is (still just the ?token= query
+// param the loopback URL carries), so no gate logic is duplicated or bypassed here.
+async function serveStream(
+  req: express.Request,
+  res: express.Response,
+  ch: PlaylistChannelDoc | null,
+  token?: string,
+): Promise<void> {
   if (!ch) {
     res.status(404).type('text/plain').send('Unknown stream');
     return;
   }
-  const domain = await resolveDomain();
-  const url = channelPlayUrl(ch, domain, token);
+  const url = channelPlayUrl(ch, `http://127.0.0.1:${NODE_PORT}`, token);
   if (!url) {
     res.status(404).type('text/plain').send('Stream unavailable');
     return;
   }
-  res.redirect(302, url);
+
+  const headers: Record<string, string> = {};
+  const range = req.headers['range'];
+  if (typeof range === 'string') headers['range'] = range;
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, { method: 'GET', headers, redirect: 'manual' });
+  } catch (err) {
+    logger.warn('xtream', `loopback stream fetch failed (${url.slice(0, 80)}): ${(err as Error).message}`);
+    if (!res.headersSent) res.status(502).type('text/plain').send('stream engine unavailable');
+    return;
+  }
+
+  res.status(upstream.status);
+  for (const h of ['content-type', 'cache-control', 'content-length', 'content-range', 'accept-ranges']) {
+    const v = upstream.headers.get(h);
+    if (v) res.set(h, v);
+  }
+  if (!upstream.body) {
+    res.end();
+    return;
+  }
+  const body = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
+  body.on('error', (err) => {
+    logger.warn('xtream', `loopback stream error: ${err.message}`);
+    res.destroy(err);
+  });
+  body.pipe(res);
 }
 
 // ---------------------------------------------------------------------------
@@ -420,7 +472,7 @@ xtreamEmulationRouter.get('/live/:username/:password/:streamId', async (req, res
   }
   const streamId = parseStreamId(req.params.streamId);
   const ch = streamId != null ? await findLiveChannel(user, streamId) : null;
-  await redirectToStream(res, ch, user.streamToken);
+  await serveStream(req, res, ch, user.streamToken);
 });
 
 // ---------------------------------------------------------------------------
@@ -502,5 +554,5 @@ xtreamEmulationRouter.get('/xc/:customId/live/:username/:password/:streamId', as
   }
   const streamId = parseStreamId(req.params.streamId);
   const ch = streamId != null ? await findCustomLiveChannel(user, req.params.customId, streamId) : null;
-  await redirectToStream(res, ch, user.streamToken);
+  await serveStream(req, res, ch, user.streamToken);
 });
