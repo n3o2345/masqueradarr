@@ -3,6 +3,13 @@ import { Readable } from 'node:stream';
 import { PlaylistChannel } from '../models/PlaylistChannel.js';
 import { userFromToken } from '../middleware/auth.js';
 import { logger } from '../sources/core/logger.js';
+import {
+  nextSocketConnId,
+  noteSocketViewerOpen,
+  noteSocketBytes,
+  noteSocketViewerClose,
+} from '../sources/core/streamTelemetry.js';
+import { streamKey, noteSuccess, noteFailed } from '../sources/core/streamState.js';
 import type { UserDoc } from '../models/User.js';
 
 // DEDICATED raw-TS passthrough for origin:'hdhomerun' channels (sources/adapters/hdhomerun/import.ts's
@@ -48,6 +55,12 @@ import type { UserDoc } from '../models/User.js';
 // (exactly what an hdhomerun stream is, via `allowPrivate`) is exactly the shape of an internal-network-pivot
 // attack, so the edge is right to distrust it. This route sidesteps that too — it never touches
 // /api/ext/v1 or the edge at all; Node fetches the tuner directly, the same way it always legitimately would.
+//
+// TELEMETRY: because this route never touches the Rust proxy pipeline, nothing was reporting these streams
+// to the WebUI's Active Streams / History — confirmed after the fix above got playback working. Fixed by
+// calling the SAME in-process telemetry cores routes/internal.ts's /telemetry endpoint feeds (sources/core/
+// streamTelemetry.ts + streamState.ts) directly, using the continuous-TS SOCKET model (one long-lived
+// connection, not the HLS poll model) — the correct shape for a raw MPEG-TS passthrough like this one.
 
 export const hdhrRawStreamRouter = Router();
 
@@ -89,10 +102,12 @@ hdhrRawStreamRouter.get('/hdhr-stream/:channelId', async (req, res) => {
     return;
   }
 
+  const key = streamKey(HDHR_ORIGIN, ch.streamEntryUrl);
   let upstream: Response;
   try {
     upstream = await fetch(ch.streamEntryUrl, { method: 'GET', redirect: 'follow' });
   } catch (err) {
+    noteFailed(key);
     logger.warn('hdhr-stream', `device fetch failed (${ch.streamEntryUrl}): ${(err as Error).message}`);
     if (!res.headersSent) res.status(502).type('text/plain').send('tuner unreachable');
     return;
@@ -106,13 +121,38 @@ hdhrRawStreamRouter.get('/hdhr-stream/:channelId', async (req, res) => {
   if (contentLength) res.set('content-length', contentLength);
 
   if (!upstream.body) {
+    if (upstream.status < 200 || upstream.status >= 300) noteFailed(key);
     res.end();
     return;
   }
+
+  // A 2xx here is itself a success (same convention the HLS `bytes`/`viewer` telemetry events use) — register
+  // the socket viewer for the WebUI's Active Streams and mark the channel live before any bytes are counted.
+  // A non-2xx is a definitive upstream failure (noteFailed), same as a bad response anywhere else in the app.
+  let connId: number | null = null;
+  if (upstream.status >= 200 && upstream.status < 300) {
+    connId = nextSocketConnId();
+    const ua = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : '';
+    noteSocketViewerOpen(HDHR_ORIGIN, ch.streamEntryUrl, req.ip ?? '', ua, found?.user?.username, 'externalPlayer', connId);
+    noteSuccess(key);
+  } else {
+    noteFailed(key);
+  }
+
   const body = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
+  if (connId !== null) {
+    const openConnId = connId;
+    body.on('data', (chunk: Buffer) => noteSocketBytes(openConnId, chunk.length));
+  }
+  const closeSocket = () => {
+    if (connId !== null) noteSocketViewerClose(connId);
+  };
   body.on('error', (err) => {
     logger.warn('hdhr-stream', `device stream error: ${err.message}`);
+    closeSocket();
     res.destroy(err);
   });
+  body.on('end', closeSocket);
+  res.on('close', closeSocket); // covers a client disconnect before the upstream body itself ends
   body.pipe(res);
 });
