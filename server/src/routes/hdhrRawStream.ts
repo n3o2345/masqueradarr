@@ -57,12 +57,13 @@ hdhrRawStreamRouter.get('/hdhr-stream/:channelId', async (req, res) => {
   }
 
   // Strip the literal ".ts" suffix (added purely for client-side extension recognition) before decoding
-  // back to the real PlaylistChannel _id — safe: a decoded id never itself ends in ".ts" (see toHdhrChannel:
-  // "<importId>:<guideNumber>", and a GuideNumber is numeric/decimal, never alphabetic).
+  // back to the real PlaylistChannel _id. base64url, not decodeURIComponent — see m3u/serialize.ts's
+  // channelPlayUrl for why: the edge in front of this app 400s a path containing percent-encoded colons
+  // (%3A, from the id's "<importId>:<guideNumber>" shape), so the id is base64url-encoded there instead.
   const rawId = req.params.channelId.replace(/\.ts$/, '');
   let channelId: string;
   try {
-    channelId = decodeURIComponent(rawId);
+    channelId = Buffer.from(rawId, 'base64url').toString('utf8');
   } catch {
     res.status(404).type('text/plain').send('Unknown channel');
     return;

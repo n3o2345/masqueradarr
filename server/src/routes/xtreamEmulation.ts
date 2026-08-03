@@ -10,6 +10,7 @@ import { fetchProgramsGrouped } from '../epg/queryPrograms.js';
 import { GLOBAL_GUIDE_PATH, customGuidePath, guideDiskPath } from '../epg/guidePaths.js';
 import { loadConfig } from '../config.js';
 import { logger } from '../sources/core/logger.js';
+import { SOURCES } from '../sources/registry.js';
 import type { PlaylistChannelDoc } from '../models/PlaylistChannel.js';
 import type { HydratedDocument } from 'mongoose';
 
@@ -17,6 +18,22 @@ import type { HydratedDocument } from 'mongoose';
 // of the normal /api/ext/v1/... proxy URL rather than 302-redirecting the client to it (see serveStream
 // below for why). Read once at module load; loadConfig() does a small synchronous file read, not per-request.
 const NODE_PORT = loadConfig().port;
+
+// Sources whose loopback-piped stream request gets 403'd by the edge's own stream-token gate — confirmed for
+// BOTH 'hdhomerun' and 'local' (edge log: `stream-token gate DENY 403 src=<id> ip=127.0.0.1`), almost
+// certainly a deliberate anti-SSRF rule against every SYNTHETIC (proxy-only, LAN/CDN-resolving) source —
+// see serveStream below for how this is used. 'hdhomerun' is EXCLUDED here even though it's synthetic:
+// channelPlayUrl already routes it through the dedicated /hdhr-stream/... endpoint (routes/hdhrRawStream.ts),
+// which the edge doesn't gate at all, so looping THAT back is fine — this set is only consulted for channels
+// that still resolve to the generic /api/ext/v1/<source>/... scheme.
+const GATE_SENSITIVE_SYNTHETIC_SOURCES = new Set(
+  SOURCES.filter((s) => s.synthetic && s.id !== 'hdhomerun').map((s) => s.id),
+);
+
+function needsRedirectFallback(ch: PlaylistChannelDoc): boolean {
+  const streamSource = ch.origin ?? ch.source;
+  return streamSource != null && GATE_SENSITIVE_SYNTHETIC_SOURCES.has(streamSource);
+}
 
 // XTREAM CODES API EMULATION — makes Masqueradarr addable as an Xtream Codes ("Xtream Login") IPTV provider
 // by anything that speaks that protocol (TiviMate, IPTV Smarters, GSE Smart IPTV, Perfect Player, Dispatcharr's
@@ -309,6 +326,24 @@ async function serveStream(
     res.status(404).type('text/plain').send('Unknown stream');
     return;
   }
+
+  // Gate-sensitive synthetic sources (currently: 'local'; 'direct' preemptively, unconfirmed but same
+  // synthetic/CDN-resolving shape) can't use the loopback pipe below — the edge 403s it. Fall back to a
+  // plain redirect instead, which is exactly what this endpoint did before the iMPlayer fix (still works
+  // fine for any client that follows redirects — regressed nothing that worked previously). iMPlayer
+  // specifically still won't play these, same as it never played ANY channel here before that fix — a
+  // narrower, pre-existing limitation, not a new one.
+  if (needsRedirectFallback(ch)) {
+    const domain = await resolveDomain();
+    const redirectUrl = channelPlayUrl(ch, domain, token);
+    if (!redirectUrl) {
+      res.status(404).type('text/plain').send('Stream unavailable');
+      return;
+    }
+    res.redirect(302, redirectUrl);
+    return;
+  }
+
   const url = channelPlayUrl(ch, `http://127.0.0.1:${NODE_PORT}`, token);
   if (!url) {
     res.status(404).type('text/plain').send('Stream unavailable');

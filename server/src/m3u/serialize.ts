@@ -32,8 +32,15 @@ export function channelPlayUrl(ch: PlaylistChannelDoc, domain: string, token?: s
   // end in — a sub-channel number like /auto/v3.2 — which some strict/native media players (confirmed:
   // iMPlayer) silently refuse to even attempt because it isn't a recognized media file extension. This one
   // always ends in a literal ".ts". See routes/hdhrRawStream.ts's file header for the full rationale.
+  //
+  // The channel id is base64url-encoded (NOT encodeURIComponent) — confirmed the edge in front of this app
+  // 400s a request whose PATH contains percent-encoded colons (%3A, from ch.id's "<importId>:<guideNumber>"
+  // shape) before it ever reaches Node, even though the exact same %3A sequences are fine elsewhere in a
+  // query string or nested inside the generic /api/ext/v1/<source>/<entry> scheme's entry segment. base64url
+  // only ever produces [A-Za-z0-9_-], so there's nothing left for any reasonable edge/proxy layer to reject.
   if (ch.origin === 'hdhomerun') {
-    let hdhrUrl = `${base}/hdhr-stream/${encodeURIComponent(ch.id)}.ts`;
+    const encodedId = Buffer.from(ch.id, 'utf8').toString('base64url');
+    let hdhrUrl = `${base}/hdhr-stream/${encodedId}.ts`;
     if (token) hdhrUrl += `?token=${encodeURIComponent(token)}`;
     hdhrUrl += `${hdhrUrl.includes('?') ? '&' : '?'}pl=${encodeURIComponent(ch.source)}`;
     return hdhrUrl;
