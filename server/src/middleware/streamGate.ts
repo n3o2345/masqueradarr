@@ -31,7 +31,7 @@ export interface GateDecision {
   message?: string;
 }
 
-const SYNTHETIC_SOURCES = new Set(SOURCES.filter((s) => s.synthetic).map((s) => s.id));
+export const SYNTHETIC_SOURCES = new Set(SOURCES.filter((s) => s.synthetic).map((s) => s.id));
 
 /**
  * The stream-access ladder as a pure function of (user, source), shared by:

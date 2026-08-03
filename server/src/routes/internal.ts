@@ -5,7 +5,8 @@ import { ingestTelemetry } from '../proxy/telemetryIngest.js';
 import { ingestProxyLog } from '../proxy/logIngest.js';
 import { getProxyLogLevel } from '../proxy/logLevel.js';
 import { userFromToken } from '../middleware/auth.js';
-import { gateStreamAccess } from '../middleware/streamGate.js';
+import { gateStreamAccess, SYNTHETIC_SOURCES } from '../middleware/streamGate.js';
+import { PlaylistChannel } from '../models/PlaylistChannel.js';
 
 // The internal Node↔sidecar control channel (loopback + shared-secret). NOT a user-facing API: the SPA never
 // calls it; only the Rust data plane does. Mounted under /api/internal so it sits outside the SPA catch-all
@@ -69,7 +70,23 @@ internalRouter.post('/authorize', async (req, res, next) => {
       return;
     }
     const found = typeof token === 'string' && token ? await userFromToken(token) : null;
-    const decision = gateStreamAccess(found?.user, source);
+    let decision = gateStreamAccess(found?.user, source);
+
+    // Synthetic-source fallback — full rationale in middleware/streamGate.ts's file header (same underlying
+    // bug: hdhomerun/local/direct are hidden from the Global provider manifest, so a non-admin user can never
+    // satisfy the allowedPlaylists check above for them). Rust's request body here carries only
+    // {token, source} — no entry URL — so unlike the Express streamGate's precise per-channel lookup, this can
+    // only check "does the user's Custom-playlist access include AT LEAST ONE Active channel of this origin".
+    // Less precise, but a real, non-blanket check, and the best available given what Rust actually sends —
+    // extending the payload with the entry URL would need a change on the Rust side, outside this app.
+    if (!decision.ok && decision.status === 403 && found?.user && SYNTHETIC_SOURCES.has(source)) {
+      const allowedCustom = found.user.allowedCustomPlaylists ?? [];
+      const hasAccess =
+        allowedCustom.length > 0 &&
+        (await PlaylistChannel.exists({ origin: source, source: { $in: allowedCustom }, status: 'Active' }));
+      if (hasAccess) decision = { ok: true };
+    }
+
     if (!decision.ok) {
       res.json({ ok: false, status: decision.status, message: decision.message });
       return;
