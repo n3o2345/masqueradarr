@@ -2,8 +2,8 @@ import { Router } from 'express';
 import { Readable } from 'node:stream';
 import { PlaylistChannel } from '../models/PlaylistChannel.js';
 import { userFromToken } from '../middleware/auth.js';
-import { gateStreamAccess } from '../middleware/streamGate.js';
 import { logger } from '../sources/core/logger.js';
+import type { UserDoc } from '../models/User.js';
 
 // DEDICATED raw-TS passthrough for origin:'hdhomerun' channels (sources/adapters/hdhomerun/import.ts's
 // HDHR_ORIGIN), used by m3u/serialize.ts's channelPlayUrl INSTEAD OF the generic /api/ext/v1/<source>/
@@ -24,11 +24,17 @@ import { logger } from '../sources/core/logger.js';
 // own "identity passthrough" description (sources/adapters/hdhomerun/index.ts): no transcode, just proxy the
 // device's raw MPEG-TS straight through.
 //
-// AUTH: same posture as the generic /api/ext/v1 mount's streamGate — a `?token=` bearer resolved via the
-// shared userFromToken() (session OR streamToken), then gateStreamAccess(user, 'hdhomerun') exactly like the
-// generic mount's streamGate would have checked for this origin. Re-implemented here (rather than reusing
-// the Express middleware directly) only because this router sits outside the /api/(ext/)v1 mounts those
-// middlewares are bound to — same rules, different wiring.
+// AUTH: verifies the requesting user actually has access to the CHANNEL'S OWNING PLAYLIST — admin, or that
+// playlist's id (ch.source — e.g. "HDHomeRun FLEX 4K") in allowedCustomPlaylists, or (belt-and-suspenders,
+// in case an HDHomeRun channel is ever reachable via Global scope) 'hdhomerun' in allowedPlaylists. This is
+// deliberately NOT gateStreamAccess(user, 'hdhomerun') (a flat allowedPlaylists-only check) — that was this
+// route's first version, and it 403'd a real, legitimately-granted user ("Forbidden: you do not have access
+// to this source") because their grant lived in allowedCustomPlaylists (the actual permission a Custom
+// playlist's "Assign access" screen manages), a completely different field gateStreamAccess never looks at.
+// By the time a request reaches here via routes/xtreamEmulation.ts's /xc/:customId/live/... it's already been
+// through channelsForUserCustom's own correct allowedCustomPlaylists check — this route's check exists for
+// the OTHER paths that reach it directly (the plain .m3u export, HDHR tuner emulation's lineup.json), where
+// nothing has authorized the request yet.
 //
 // Mounted at root (see index.ts) — reachable at /hdhr-stream/<channel _id>.ts?token=...&pl=...
 // (`pl` is accepted but unused here — this route has no per-playlist videoconfig branch to select, unlike
@@ -47,14 +53,17 @@ export const hdhrRawStreamRouter = Router();
 
 const HDHR_ORIGIN = 'hdhomerun'; // mirrors sources/adapters/hdhomerun/import.ts's HDHR_ORIGIN constant
 
+function canAccessChannel(user: UserDoc | undefined, ch: { source: string }): boolean {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  if ((user.allowedCustomPlaylists ?? []).includes(ch.source)) return true;
+  if ((user.allowedPlaylists ?? []).includes(HDHR_ORIGIN)) return true;
+  return false;
+}
+
 hdhrRawStreamRouter.get('/hdhr-stream/:channelId', async (req, res) => {
   const token = typeof req.query.token === 'string' ? req.query.token : '';
   const found = token ? await userFromToken(token) : null;
-  const decision = gateStreamAccess(found?.user, HDHR_ORIGIN);
-  if (!decision.ok) {
-    res.status(decision.status ?? 403).type('text/plain').send(decision.message ?? 'Forbidden');
-    return;
-  }
 
   // Strip the literal ".ts" suffix (added purely for client-side extension recognition) before decoding
   // back to the real PlaylistChannel _id. base64url, not decodeURIComponent — see m3u/serialize.ts's
@@ -72,6 +81,11 @@ hdhrRawStreamRouter.get('/hdhr-stream/:channelId', async (req, res) => {
   const ch = await PlaylistChannel.findOne({ _id: channelId, origin: HDHR_ORIGIN, status: 'Active' }).lean();
   if (!ch || !ch.streamEntryUrl) {
     res.status(404).type('text/plain').send('Unknown channel');
+    return;
+  }
+
+  if (!canAccessChannel(found?.user, ch)) {
+    res.status(403).type('text/plain').send('Forbidden: you do not have access to this playlist');
     return;
   }
 
