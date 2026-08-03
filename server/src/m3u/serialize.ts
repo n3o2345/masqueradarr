@@ -26,6 +26,19 @@ export function channelPlayUrl(ch: PlaylistChannelDoc, domain: string, token?: s
   const streamSource = ch.origin ?? ch.source;
   if (!ch.streamEntryUrl || !streamSource) return null;
   const base = domain.replace(/\/+$/, '');
+
+  // HDHomeRun-origin channels: a DEDICATED clean-extension URL (routes/hdhrRawStream.ts) instead of the
+  // generic scheme below. The generic scheme's outer URL ends in whatever the device's own path happens to
+  // end in — a sub-channel number like /auto/v3.2 — which some strict/native media players (confirmed:
+  // iMPlayer) silently refuse to even attempt because it isn't a recognized media file extension. This one
+  // always ends in a literal ".ts". See routes/hdhrRawStream.ts's file header for the full rationale.
+  if (ch.origin === 'hdhomerun') {
+    let hdhrUrl = `${base}/hdhr-stream/${encodeURIComponent(ch.id)}.ts`;
+    if (token) hdhrUrl += `?token=${encodeURIComponent(token)}`;
+    hdhrUrl += `${hdhrUrl.includes('?') ? '&' : '?'}pl=${encodeURIComponent(ch.source)}`;
+    return hdhrUrl;
+  }
+
   let url = `${base}/api/ext/v1/${streamSource}/${encodeURIComponent(ch.streamEntryUrl)}`;
   if (token) {
     url += `?token=${encodeURIComponent(token)}`;

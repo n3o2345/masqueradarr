@@ -48,6 +48,7 @@ import { streamGate } from './middleware/streamGate.js';
 import { proxyRelay } from './proxy/relay.js';
 import { hdhomerunEmulationRouter } from './routes/hdhomerunEmulation.js';
 import { xtreamEmulationRouter } from './routes/xtreamEmulation.js';
+import { hdhrRawStreamRouter } from './routes/hdhrRawStream.js';
 
 // Same-origin gate for the dulo login-stream WebSocket. Compares HOSTNAMES (ignoring port) so the Vite dev
 // proxy (localhost:5173 → localhost:3000) and the co-served prod SPA both pass, while a cross-site page is
@@ -253,6 +254,11 @@ async function main() {
   // middleware never touches it; the Xtream username/password IS the auth, verified per-request against the
   // real account. See routes/xtreamEmulation.ts for the full design note.
   app.use(xtreamEmulationRouter);
+
+  // HDHomeRun-origin raw-TS passthrough (/hdhr-stream/<channel>.ts) — see routes/hdhrRawStream.ts's file
+  // header for why HDHomeRun-origin channels need a dedicated route instead of the generic /api/ext/v1
+  // proxy scheme every other channel uses. Root-mounted for the same reason as the two routers above.
+  app.use(hdhrRawStreamRouter);
 
   // composeDir holds the m3u exports (decoupled from the SPA's publicDir). Files are PER-USER ONLY
   // (<username>-<slug>.m3u) under _global/m3u/ (Global) and custom/<customPath>/ (Custom), plus the EPG
