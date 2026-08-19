@@ -324,6 +324,11 @@ pub async fn serve_stream(
     //    first (Node re-runs resolveStream → dlhd/dami reprobeMirror — the pre-failover mirror rotation),
     //    then, when failoverEnabled, the NEXT candidates in Node's order. A DEFINITIVE non-2xx enters the
     //    walk only when failoverOnDefiniteError is on (default keeps the forward-verbatim semantics).
+    // FOG-3: true only for the ONE response that comes back from a successful failover recovery (never for a
+    // normal steady-state poll that succeeded on its first fetch, never for WalkOutcome::Definitive, which
+    // forwards its non-2xx verbatim and never reaches the manifest-rewrite branch below anyway). Read once,
+    // at the manifest-rewrite site, to call manifest::mark_discontinuity — see that function's doc comment.
+    let mut just_recovered = false;
     if resp.is_none() && is_hop {
         log::warn("proxy", &rid, || "hop fetch failed — kicking async policy refresh (client refetches)".to_string());
         if !stream_entry.is_empty() {
@@ -362,6 +367,7 @@ pub async fn serve_stream(
                     policy = p;
                     fetch_url = target;
                     resp = Some(r);
+                    just_recovered = true;
                 }
                 WalkOutcome::Definitive(p, r) => {
                     policy = p;
@@ -490,6 +496,11 @@ pub async fn serve_stream(
         let prefix = format!("{mount_path}/{source}/h/");
         let suffix = build_child_query(token.as_deref(), pl.as_deref(), &stream_entry);
         let RewriteResult { body, hosts, media } = rewrite_manifest(&text_body, &final_url, &prefix, &suffix);
+        // FOG-3: this is the one response immediately following a failover recovery — mark the transition so
+        // a compliant player treats it as an expected boundary instead of an unsignaled jump. See
+        // manifest::mark_discontinuity's doc comment. No-op (returns body unchanged) on a master playlist or
+        // one with no segment line to anchor before.
+        let body = if just_recovered { crate::manifest::mark_discontinuity(body) } else { body };
         // SIR: STREAM-INF Redux — opt-in, ext-mount-only reorder of the rewritten MASTER so the first
         // #EXT-X-STREAM-INF lands within a strict player's manifest probe window (e.g. VLC's ~8 KiB peek). A pure
         // post-transform layered OVER rewrite_manifest (unchanged) — a no-op (borrowed) when the flag is off or

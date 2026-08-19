@@ -143,6 +143,41 @@ pub fn extract_media(body: &str) -> MediaInfo {
     media
 }
 
+/// FOG-3: mark the start of a failover-recovered media playlist with `#EXT-X-DISCONTINUITY` (RFC 8216
+/// §4.3.2.3) so a compliant player treats the timestamp/codec jump from the OLD candidate to the NEW one as
+/// an expected boundary — not corruption — and does a quick internal re-init instead of the harder stall (or
+/// outright playback error) an unsignaled jump can trigger. `rewrite_manifest` above is pure URL-rewriting on
+/// purpose and never touches segment semantics; this is a deliberate, separate, OPT-IN-BY-CALLER pass layered
+/// over its output.
+///
+/// Caller contract (see proxy.rs's `just_recovered`): call this ONLY on the one manifest response that
+/// immediately follows a `WalkOutcome::Recovered`. Every later poll of the same, now-stable candidate must NOT
+/// call this — so exactly one discontinuity marks exactly one transition, matching how a real single-source
+/// stream reports a live discontinuity, rather than tagging every poll after a switch.
+///
+/// No-op on a MASTER playlist (`#EXT-X-STREAM-INF` present — a master lists variants, not segments, so there
+/// is nothing to anchor a discontinuity to) or on a manifest with no `#EXTINF` line to anchor before (a
+/// momentarily empty live-edge window; the walk's own next poll fills it regardless, and by then this response
+/// is no longer "the one right after a recovery").
+pub fn mark_discontinuity(body: String) -> String {
+    if body.contains("#EXT-X-STREAM-INF:") {
+        return body;
+    }
+    match body.find("\n#EXTINF") {
+        Some(pos) => {
+            let insert_at = pos + 1; // right after that '\n', i.e. immediately before "#EXTINF"
+            let mut out = String::with_capacity(body.len() + 24);
+            out.push_str(&body[..insert_at]);
+            out.push_str("#EXT-X-DISCONTINUITY\n");
+            out.push_str(&body[insert_at..]);
+            out
+        }
+        // The FIRST line (no leading '\n' to find) is itself an #EXTINF — same insertion, different shape.
+        None if body.trim_start().starts_with("#EXTINF") => format!("#EXT-X-DISCONTINUITY\n{body}"),
+        None => body,
+    }
+}
+
 /// Rewrite a whole manifest body. `prefix` is the proxied child mount (e.g. "/api/ext/v1/dlhd/h/") and
 /// `suffix` the re-embedded query ("?token=…&pl=…&e=…"). Line endings are normalized to LF (as the TS did).
 pub fn rewrite_manifest(body: &str, base: &Url, prefix: &str, suffix: &str) -> RewriteResult {
@@ -570,5 +605,36 @@ mod tests {
         assert!(out.find("#EXT-X-STREAM-INF").unwrap() < out.find("#EXT-X-MEDIA").unwrap());
         assert!(out.contains("v.m3u8"));
         assert!(out.contains("#EXT-X-MEDIA"));
+    }
+
+    #[test]
+    fn discontinuity_inserted_before_first_segment() {
+        let m = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:42\n#EXTINF:6.0,\na.ts\n#EXTINF:6.0,\nb.ts\n";
+        let out = mark_discontinuity(m.to_string());
+        assert!(out.find("#EXT-X-DISCONTINUITY").unwrap() < out.find("#EXTINF").unwrap());
+        // exactly once, right before the FIRST segment only — not repeated per segment.
+        assert_eq!(out.matches("#EXT-X-DISCONTINUITY").count(), 1);
+        assert!(out.contains("a.ts") && out.contains("b.ts"));
+    }
+
+    #[test]
+    fn discontinuity_handles_extinf_as_first_line() {
+        let m = "#EXTINF:6.0,\na.ts\n";
+        let out = mark_discontinuity(m.to_string());
+        assert!(out.starts_with("#EXT-X-DISCONTINUITY\n#EXTINF"));
+    }
+
+    #[test]
+    fn discontinuity_skips_master_playlist() {
+        let m = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8\n";
+        let out = mark_discontinuity(m.to_string());
+        assert_eq!(out, m); // untouched — a master lists variants, not segments
+    }
+
+    #[test]
+    fn discontinuity_skips_empty_window() {
+        let m = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:42\n";
+        let out = mark_discontinuity(m.to_string());
+        assert_eq!(out, m); // no segment to anchor before — left as-is
     }
 }
