@@ -33,6 +33,21 @@ use crate::stream::{segment_body, TelemetryCtx};
 pub(crate) const MAX_UPSTREAM_RETRIES: u32 = 2; // total attempts = 1 + this
 const RETRY_BACKOFF_MS: [u64; 2] = [200, 500];
 
+// FOG-2: failover-recovery timeout cap. `connect_timeout_ms`/`read_timeout_ms` on a stream's policy are
+// tuned for STEADY-STATE playback — an operator reasonably sets a generous connect timeout (default 15s) to
+// tolerate a slow-starting mirror on first tune-in, and often leaves read_timeout_ms at its default of 0
+// (disabled/unbounded) rather than risk flagging a legitimately slow CDN edge as dead mid-stream. Neither
+// default belongs inside `failover_walk`: this only runs AFTER a fetch has already failed, so a candidate
+// here is being asked "are you alive RIGHT NOW", not "please wait for you to warm up" — and 0/disabled read
+// timeout means a candidate that accepts the TCP connection but never sends headers (a hung reseller edge,
+// as opposed to a cleanly refused/unreachable one) can stall the walk indefinitely instead of failing fast.
+// With MAX_FAILOVER_ATTEMPTS candidates to get through, that is exactly what turns "failing over" into
+// "buffers a lot" for the viewer. Capped, never loosened: effective timeout is min(configured, this) for
+// connect, and this same cap ONLY when read_timeout_ms is unset (0) — an operator's own tighter, explicit
+// value is always honored as-is.
+const FAILOVER_CONNECT_CAP_MS: u64 = 5000;
+const FAILOVER_READ_CAP_MS: u64 = 5000;
+
 /// Retryable = a transient gateway status. 404 (not live) / 403 (gate) / other 4xx and a plain 500 are
 /// DEFINITIVE (retrying would just repeat them) and forwarded verbatim.
 fn is_retryable_status(status: u16) -> bool {
@@ -676,11 +691,18 @@ pub(crate) async fn failover_walk(
                         break;
                     }
                 }
-                let client = state.client_for(
-                    p.connect_timeout_ms.load(Ordering::Relaxed),
-                    p.max_redirects.load(Ordering::Relaxed),
-                );
-                let read_timeout_ms = p.read_timeout_ms.load(Ordering::Relaxed);
+                // FOG-2: cap connect/read timeouts for this recovery fetch — see FAILOVER_CONNECT_CAP_MS's
+                // doc comment. min(configured, cap) for connect; the same cap ONLY when read is unset (0),
+                // never loosening an operator's own tighter explicit value either way.
+                let configured_connect_ms = p.connect_timeout_ms.load(Ordering::Relaxed);
+                let connect_ms = configured_connect_ms.min(FAILOVER_CONNECT_CAP_MS);
+                let client = state.client_for(connect_ms, p.max_redirects.load(Ordering::Relaxed));
+                let configured_read_ms = p.read_timeout_ms.load(Ordering::Relaxed);
+                let read_timeout_ms = if configured_read_ms == 0 {
+                    FAILOVER_READ_CAP_MS
+                } else {
+                    configured_read_ms.min(FAILOVER_READ_CAP_MS)
+                };
                 let retries = if tried == 1 { MAX_UPSTREAM_RETRIES } else { 0 };
                 // Level-3 lineage: backups get a single one-shot fetch (no RSL budget, no backoff) so a
                 // multi-child group still establishes inside a player's manifest timeout.
