@@ -32,6 +32,16 @@ import {
   PLAYER_PREFIXES,
 } from './config.js';
 
+// Per-hop timeout for the live channel-switch resolve chain below. Every OTHER network call in this adapter
+// tree (mirrorDirectory's probe, schedule.ts, hdhomerun/lineup.ts, local/api.ts) already bounds itself with
+// AbortSignal.timeout — this file, the one on the actual channel-switch critical path, was the one place that
+// didn't, and Node's underlying undici has no default response timeout (its own default is 300s). A mirror
+// that's dying rather than cleanly down — TCP connects, then just sits there — could silently turn "switch
+// channels" into "wait minutes" on hop 1/2/3 or the watch.php player-list fetch, all four of which are plain
+// text/HTML fetches with nothing to justify tolerating more than a few seconds. Same env-override convention
+// as the sibling constants above (DLHD_PROBE_TIMEOUT_MS, DLHD_SCHEDULE_TIMEOUT_MS).
+const RESOLVE_TIMEOUT_MS = Number(process.env.DLHD_RESOLVE_TIMEOUT_MS || 6000);
+
 export interface ResolvedStream {
   id: string;
   playerUrl: string;
@@ -102,6 +112,7 @@ async function listPlayerPages(id: string): Promise<PlayerPage[]> {
   try {
     const r = await fetch(`${getBase()}/watch.php?id=${id}`, {
       headers: { Referer: getReferer(), 'User-Agent': UA },
+      signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
     });
     if (r.ok) {
       const html = await r.text();
@@ -145,7 +156,10 @@ async function resolveViaStreamPage(
   playerCount: number,
 ): Promise<ResolvedStream> {
   // ── hop 1: discover the rotating player URL from the mirror ──────────────────
-  const s = await fetch(streamPageUrl, { headers: { Referer: getReferer(), 'User-Agent': UA } });
+  const s = await fetch(streamPageUrl, {
+    headers: { Referer: getReferer(), 'User-Agent': UA },
+    signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
+  });
   if (!s.ok) throw new Error(`stream page fetch failed: HTTP ${s.status} (${streamPageUrl})`);
   const playerUrl = findPlayerUrl(await s.text());
   if (!playerUrl) throw new Error(`No premiumtv player found for channel ${id} — not live or layout changed`);
@@ -165,7 +179,10 @@ async function resolveViaStreamPage(
   }
 
   // ── hop 2: pull the base64-embedded signed master from the player page ───────
-  const d = await fetch(playerUrl, { headers: { Referer: getReferer(), 'User-Agent': UA } });
+  const d = await fetch(playerUrl, {
+    headers: { Referer: getReferer(), 'User-Agent': UA },
+    signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
+  });
   if (!d.ok) throw new Error(`player page fetch failed: HTTP ${d.status} (Referer-gated)`);
   const masterUrl = extractMasterFromPlayer(await d.text());
   if (!masterUrl) throw new Error(`No signed master URL in player page for channel ${id} — not live`);
@@ -179,7 +196,10 @@ async function resolveViaStreamPage(
   // requires the (rotating) player origin as Referer — the signed path alone is no longer sufficient
   // (it was, under the old ?md5v1=&expires= scheme). "rejected" (not "…fetch failed") keeps a genuine
   // HTTP 4xx from being misread as an unreachable mirror upstream (see dlhd.ts looksUnreachable). ──
-  const m = await fetch(masterUrl, { headers: { Referer: playerRef, 'User-Agent': UA } });
+  const m = await fetch(masterUrl, {
+    headers: { Referer: playerRef, 'User-Agent': UA },
+    signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
+  });
   if (!m.ok) throw new Error(`master playlist rejected: HTTP ${m.status} ${masterUrl}`);
   const master = await m.text();
   if (!master.startsWith('#EXTM3U')) throw new Error(`Master is not an HLS playlist (got: ${master.slice(0, 50)}…)`);
