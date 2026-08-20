@@ -99,6 +99,13 @@ pub struct TargetEntry {
     policy_key: String,
     attempt: u32,
     last_access: Instant,
+    // FOG-4: set when a HOP-triggered background `resolve_fresh` (see `Proxy::resolve_at`) lands a
+    // DIFFERENT target than what was cached before it — i.e. the mirror actually rotated out from under an
+    // in-progress session, not just a routine re-resolve that happened to confirm the same one. Consumed
+    // (read-and-cleared) by the next ENTRY poll's cache-hit path in `resolve_entry`, which reports it back to
+    // proxy.rs as `just_recovered` so `manifest::mark_discontinuity` fires on that poll — the same signal a
+    // full failover_walk recovery gives, for a switch that happened without ever going through the walk.
+    pending_discontinuity: bool,
 }
 
 /// The target-cache key for a stream: (mount source, entry url) — NUL-joined like the log rid.
@@ -381,7 +388,7 @@ impl AppState {
         source: &str,
         entry: &str,
         pl: Option<&str>,
-    ) -> Result<(Arc<SourcePolicy>, String), ResolveErr> {
+    ) -> Result<(Arc<SourcePolicy>, String, bool), ResolveErr> {
         let key = target_key(source, entry);
         let now = Instant::now();
         let (cached, attempt) = {
@@ -403,10 +410,26 @@ impl AppState {
         };
         if let Some((target, policy_key)) = cached {
             if let Some(policy) = self.get(&policy_key) {
-                return Ok((policy, target));
+                // FOG-4: this poll is what CONSUMES a background hop-refresh's silent target rotation — read
+                // and clear it here so it's reported exactly once, to the first entry poll that observes it.
+                let needs_discontinuity = self.take_pending_discontinuity(source, entry);
+                return Ok((policy, target, needs_discontinuity));
             }
         }
-        self.resolve_at(source, entry, pl, attempt).await
+        let (policy, target) = self.resolve_at(source, entry, pl, attempt).await?;
+        let needs_discontinuity = self.take_pending_discontinuity(source, entry);
+        Ok((policy, target, needs_discontinuity))
+    }
+
+    /// FOG-4: read-and-clear `pending_discontinuity` for a stream's cached target. See `TargetEntry`'s field
+    /// doc comment for what sets it and why this is consumed exactly once.
+    fn take_pending_discontinuity(&self, source: &str, entry: &str) -> bool {
+        self.targets
+            .lock()
+            .unwrap()
+            .get_mut(&target_key(source, entry))
+            .map(|e| std::mem::take(&mut e.pending_discontinuity))
+            .unwrap_or(false)
     }
 
     /// FOG: force a FRESH resolve of a SPECIFIC candidate (bypass the target cache) and re-cache the
@@ -422,16 +445,25 @@ impl AppState {
     ) -> Result<(Arc<SourcePolicy>, String), ResolveErr> {
         let (policy, policy_key, target) = self.resolve(source, entry, pl, attempt).await?;
         let now = Instant::now();
-        self.targets.lock().unwrap().insert(
-            target_key(source, entry),
+        let key = target_key(source, entry);
+        let mut m = self.targets.lock().unwrap();
+        // FOG-4: a resolve that lands on a DIFFERENT target than whatever was cached a moment before it is a
+        // mirror rotating out from under an in-progress session (or a failover_walk recovery, or a plain
+        // cold resolve with nothing cached yet — the `Some(prev)` guard makes only the FIRST case `true`) —
+        // flagged here for the next entry poll to pick up. See TargetEntry::pending_discontinuity.
+        let changed = matches!(m.get(&key), Some(prev) if prev.target != target);
+        m.insert(
+            key,
             TargetEntry {
                 target: target.clone(),
                 expires: now + TARGET_TTL,
                 policy_key,
                 attempt,
                 last_access: now,
+                pending_discontinuity: changed,
             },
         );
+        drop(m);
         Ok((policy, target))
     }
 

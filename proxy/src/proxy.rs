@@ -164,6 +164,13 @@ pub async fn serve_stream(
     // (its own target AND its own policy — a failover child's grants file under the child's adapter key).
     // `prefetched` carries a response the resolve-failure walk already fetched (skips the initial fetch).
     let mut prefetched: Option<reqwest::Response> = None;
+    // FOG-4/FOG-3: hoisted above the resolve step (not declared at its point of first real use further down)
+    // because a SWITCH can now be discovered here too — either resolve_entry reporting a hop-refresh's
+    // silent target rotation (FOG-4), or this initial resolve failing outright and recovering onto a
+    // different failover candidate (below) — not only later, from a failed FETCH of an already-resolved
+    // target. Every site that lands on a different candidate than last served sets this; the manifest-rewrite
+    // site (further down) reads it once and calls manifest::mark_discontinuity if true.
+    let mut just_recovered = false;
     let (mut policy, mut fetch_url, stream_entry) = if is_hop {
         // FOG: a hop belongs to whatever candidate its stream is pinned to — hop_policy resolves the
         // stream's policy_key via the propagated `&e=` entry (falling back to the mount source's policy),
@@ -183,7 +190,7 @@ pub async fn serve_stream(
                 }
                 log::info("proxy", &rid, || "cold hop (no cached policy) — re-resolving from entry".to_string());
                 match state.resolve_entry(source, &entry, pl.as_deref()).await {
-                    Ok((p, _)) => p,
+                    Ok((p, _, _)) => p,
                     Err(err) => {
                         // A cold-hop re-resolve failed (session/mirror gone) — the channel can't produce a
                         // stream, so mark it failed (a resolve failure has no HTTP status → 502 sentinel).
@@ -199,8 +206,9 @@ pub async fn serve_stream(
         (policy, decoded.clone(), e_param.clone().unwrap_or_default())
     } else {
         match state.resolve_entry(source, &decoded, pl.as_deref()).await {
-            Ok((p, target)) => {
+            Ok((p, target, needs_discontinuity)) => {
                 log::info("proxy", &rid, || format!("entry resolved → {}", host_of(&target)));
+                just_recovered = needs_discontinuity;
                 (p, target, decoded.clone())
             }
             Err(err) => {
@@ -230,6 +238,7 @@ pub async fn serve_stream(
                 match walked {
                     WalkOutcome::Recovered(p, target, r) => {
                         prefetched = Some(r);
+                        just_recovered = true; // a resolve-failure recovery is a candidate switch too
                         (p, target, decoded.clone())
                     }
                     WalkOutcome::Definitive(p, r) => {
@@ -316,29 +325,44 @@ pub async fn serve_stream(
     };
 
     // RSL mirror failover + FOG failover-group walk on a failed ENTRY establish:
-    //  · HOP — a child segment/variant host died; a fresh master can't be substituted for a child mid-poll,
-    //    so kick a best-effort async policy refresh AT THE STREAM'S PINNED CANDIDATE (so a re-requested
-    //    entry / cold hop rides the live mirror — and a failover-pinned stream never snaps back to its dead
-    //    parent) and fail this request (the player refetches).
+    //  · HOP — a child segment/variant host died OR came back with a status that specifically signals an
+    //    expired/invalid SIGNED URL (401/403 — dlhd/dami mint short-lived per-request tokens, so this is the
+    //    ordinary shape of "the token aged out", not a real access denial). A fresh master can't be
+    //    substituted for THIS already-failed segment mid-poll — that one segment is simply lost — but WITHOUT
+    //    this, nothing refreshes the cached policy until the CLIENT itself gives up and reloads the entry,
+    //    which is what turned "switch streams" into repeated 403s for ~20s before recovering: the refresh now
+    //    starts on the FIRST bad hop instead of the one that finally forces a client-side reload. Kicks a
+    //    best-effort async policy refresh AT THE STREAM'S PINNED CANDIDATE (so a re-requested entry / cold hop
+    //    rides the live mirror — and a failover-pinned stream never snaps back to its dead parent) and fails
+    //    this one request (the player refetches this segment; resolve_at flags the target-rotation via
+    //    TargetEntry::pending_discontinuity for whichever entry poll picks up the refreshed target next).
     //  · ENTRY — a transport failure always enters the walk: a fresh resolve of the SAME pinned candidate
     //    first (Node re-runs resolveStream → dlhd/dami reprobeMirror — the pre-failover mirror rotation),
     //    then, when failoverEnabled, the NEXT candidates in Node's order. A DEFINITIVE non-2xx enters the
     //    walk only when failoverOnDefiniteError is on (default keeps the forward-verbatim semantics).
-    // FOG-3: true only for the ONE response that comes back from a successful failover recovery (never for a
-    // normal steady-state poll that succeeded on its first fetch, never for WalkOutcome::Definitive, which
-    // forwards its non-2xx verbatim and never reaches the manifest-rewrite branch below anyway). Read once,
-    // at the manifest-rewrite site, to call manifest::mark_discontinuity — see that function's doc comment.
-    let mut just_recovered = false;
-    if resp.is_none() && is_hop {
-        log::warn("proxy", &rid, || "hop fetch failed — kicking async policy refresh (client refetches)".to_string());
-        if !stream_entry.is_empty() {
-            let (st, src, ent, plc) =
-                (state.clone(), source.to_string(), stream_entry.clone(), pl.clone());
-            tokio::spawn(async move {
-                let _ = st.resolve_fresh(&src, &ent, plc.as_deref()).await;
+    // FOG-3: `just_recovered` (declared above, before the initial resolve) is read once, at the manifest-
+    // rewrite site below, to call manifest::mark_discontinuity — see that function's doc comment. Left
+    // UNCHANGED by a normal steady-state poll that succeeded on its first fetch, and by WalkOutcome::
+    // Definitive (forwards its non-2xx verbatim and never reaches the manifest-rewrite branch anyway).
+    if is_hop {
+        let hop_status = resp.as_ref().map(|r| r.status().as_u16());
+        let token_expired = matches!(hop_status, Some(401) | Some(403));
+        if resp.is_none() || token_expired {
+            log::warn("proxy", &rid, || {
+                format!(
+                    "hop {} — kicking async policy refresh (client refetches)",
+                    hop_status.map(|s| format!("got {s}")).unwrap_or_else(|| "fetch failed".to_string())
+                )
             });
+            if !stream_entry.is_empty() {
+                let (st, src, ent, plc) =
+                    (state.clone(), source.to_string(), stream_entry.clone(), pl.clone());
+                tokio::spawn(async move {
+                    let _ = st.resolve_fresh(&src, &ent, plc.as_deref()).await;
+                });
+            }
         }
-    } else if !is_hop {
+    } else {
         let walk_children = policy.failover_enabled.load(Ordering::Relaxed);
         let on_definite = policy.failover_on_definite_error.load(Ordering::Relaxed);
         let definitive_trigger = walk_children
