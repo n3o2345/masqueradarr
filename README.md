@@ -555,8 +555,9 @@ priority order, save.
 
 Knobs: `failoverEnabled` (default **on** — configuring a group is the real opt-in) and
 `failoverOnDefiniteError` (default **off**) in the [proxyconfigs subsystem](#tuning-knobs--the-proxyconfigs-subsystem).
-Seamless mid-segment splicing is a future enhancement — a parent dying mid-play is caught on the player's
-next playlist refetch.
+For DLHD on the external-player endpoint, compatible MPEG-TS feeds use the continuous distributor. A
+segment, token, or mirror failure is re-resolved (then walked through configured backups) without closing the
+client socket; fMP4/AES feeds retain standard HLS behavior and recover on their next playlist poll.
 
 <img src="docs/diagrams/failover-groups.svg" alt="Failover groups end to end: the group modal writes three fields on each channel doc and cascades the parent's EPG identity; compose exports only the parent; at play time a failed ENTRY establish sends the Rust data plane through failover_walk, resolving each ordered Active child through Node's seam (200 grant, 502 try-the-next, 410 exhausted) until one answers, after which the stream's cursor sticks to the winning candidate.">
 
@@ -736,9 +737,9 @@ The Rust engine is built to keep a stream alive on flaky upstreams:
 - **Read-ahead buffer** — a bounded in-memory buffer (`bufferSizeKb`) smooths jitter and fixes the
   chunked / no-Content-Length byte undercount that used to fake client-side buffering.
 - **Batched telemetry** — events are coalesced and posted off the hot path, so reporting never blocks bytes.
-- **Raw MPEG-TS** — with `outputFormat: 'ts'`, an external-mount stream is served as **one continuous
-  `video/mp2t`** stream (segments concatenated, no remux) for players that prefer a flat TS pipe; fMP4 / AES
-  sources auto-fall back to HLS.
+- **Raw MPEG-TS** — with `outputFormat: 'ts'` (and automatically for compatible DLHD streams), an
+  external-mount stream is served as **one continuous `video/mp2t`** stream (segments concatenated, no remux)
+  for players that prefer a flat TS pipe; fMP4 / AES sources auto-fall back to HLS.
 
 ## Tuning knobs — the `proxyconfigs` subsystem
 

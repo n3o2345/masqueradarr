@@ -168,6 +168,9 @@ pub struct SourcePolicy {
     /// FOG: also treat a DEFINITIVE upstream non-2xx (4xx/5xx — normally forwarded verbatim) as a failover
     /// trigger. Default OFF: it changes long-standing forward-verbatim semantics, so the operator opts in.
     pub failover_on_definite_error: AtomicBool,
+    /// Source-level preference for the external continuous TS distributor. The producer holds the client
+    /// socket through DLHD master/segment failover; incompatible streams fall back to HLS before opening it.
+    pub prefer_continuous_ts: AtomicBool,
     /// TSH: shared HDHomeRun tuner idle-release delay (s), read by tuner_share.rs::start() at spawn time —
     /// replaces the old MASQ_TUNER_IDLE_SECS-env-only global (still the (Default)'s out-of-box seed; see
     /// proxyconfig/translate.ts envDefaults). 20 matches tuner_share.rs's original hardcoded value.
@@ -190,6 +193,7 @@ impl SourcePolicy {
             stream_inf_redux: AtomicBool::new(false),
             failover_enabled: AtomicBool::new(true),
             failover_on_definite_error: AtomicBool::new(false),
+            prefer_continuous_ts: AtomicBool::new(false),
             tuner_idle_secs: AtomicU64::new(20),
         }
     }
@@ -220,6 +224,9 @@ pub struct Grant {
     /// FOG: failover context when this grant serves a candidate (attempt >= 1) — used for log attribution.
     #[serde(rename = "failover", default)]
     pub failover: Option<FailoverWire>,
+    /// Source-level request to use the continuous TS distributor on the external mount when possible.
+    #[serde(rename = "preferContinuousTs", default)]
+    pub prefer_continuous_ts: bool,
     // (Node's grant also carries `isEntry`; the sidecar decides entry/hop from the path, so serde ignores it.)
 }
 
@@ -620,6 +627,9 @@ impl AppState {
         policy
             .failover_on_definite_error
             .store(grant.proxy_config.failover_on_definite_error, Ordering::Relaxed);
+        policy
+            .prefer_continuous_ts
+            .store(grant.prefer_continuous_ts, Ordering::Relaxed);
         policy.tuner_idle_secs.store(grant.proxy_config.tuner_idle_secs, Ordering::Relaxed);
         if let Ok(u) = Url::parse(&grant.target) {
             if let Some(h) = u.host_str() {

@@ -39,6 +39,8 @@ export interface ResolveGrant {
   allowPrivate: boolean;
   /** Whether the request URL needed server-side resolution (vs a direct passthrough entry). */
   isEntry: boolean;
+  /** Prefer the external continuous raw-TS distributor for this source when its stream is compatible. */
+  preferContinuousTs: boolean;
   /** The resolved (Default/Custom) data-plane config for this stream — Rust applies the LIVE knobs, carries the rest. */
   proxyConfig: RuntimeProxyConfig;
   /**
@@ -162,6 +164,7 @@ export async function buildGrant(
     relabelSegment,
     allowPrivate: adapter.proxy.allowPrivate ?? false,
     isEntry,
+    preferContinuousTs: adapter.preferContinuousTs ?? false,
     proxyConfig,
     policySource: source,
     failover: null,
@@ -286,6 +289,7 @@ async function buildFailoverGrant(
     relabelSegment,
     allowPrivate: candAdapter.proxy.allowPrivate ?? false,
     isEntry,
+    preferContinuousTs: candAdapter.preferContinuousTs ?? false,
     proxyConfig,
     policySource: candSource,
     failover,

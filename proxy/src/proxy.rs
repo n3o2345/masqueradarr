@@ -487,12 +487,15 @@ pub async fn serve_stream(
         }
         let text_body = String::from_utf8_lossy(&raw_body).into_owned();
         // DST: continuous raw-TS output on the external mount when the (Default)/(Custom) proxyconfig selects
-        // outputFormat 'ts' AND the upstream is pure MPEG-TS. Only on the ENTRY (the client then holds ONE TS
+        // outputFormat 'ts', OR when a source (DLHD) explicitly prefers it, AND the upstream is pure MPEG-TS.
+        // Only on the ENTRY (the client then holds ONE TS
         // socket and issues no HOP polls). Not eligible (fMP4 / AES / no reachable variant) → fall through to
         // the HLS rewrite below (text_body + final_url are cloned so the fallback still owns them).
         log::trace("proxy", &rid, || format!("manifest received ({} bytes) from {}", text_body.len(), host_of(final_url.as_str())));
-        if !is_hop && mount_path == "/api/ext/v1" && policy.output_format.read().unwrap().as_str() == "ts" {
-            log::info("proxy", &rid, || "outputFormat=ts — handing off to the raw-TS producer".to_string());
+        let use_continuous_ts = policy.output_format.read().unwrap().as_str() == "ts"
+            || policy.prefer_continuous_ts.load(Ordering::Relaxed);
+        if !is_hop && mount_path == "/api/ext/v1" && use_continuous_ts {
+            log::info("proxy", &rid, || "continuous TS selected — handing off to the raw-TS producer".to_string());
             let ts_ctx = crate::tsmux::TsContext {
                 state: state.clone(),
                 policy: policy.clone(),

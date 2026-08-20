@@ -1,7 +1,7 @@
 //! DST-3 continuous raw-TS distribution — a remux-free raw-TS "output format" for the external-player mount.
 //!
-//! When the (Default)/(Custom) proxyconfig sets `outputFormat: "ts"`, an /api/ext/v1 ENTRY request is served as
-//! ONE continuous `video/mp2t` chunked response instead of a rewritten HLS manifest: we follow the upstream
+//! When the (Default)/(Custom) proxyconfig sets `outputFormat: "ts"` — or a source such as DLHD prefers it — an
+//! /api/ext/v1 ENTRY request is served as ONE continuous `video/mp2t` chunked response instead of a rewritten HLS manifest: we follow the upstream
 //! MEDIA playlist on its target-duration cadence and CONCATENATE each new segment's raw bytes into the client
 //! socket. MPEG-TS packets are self-framing and concatenable, so this needs no remux (RMX stays deferred).
 //!
@@ -330,6 +330,7 @@ async fn ts_producer(
                 ctx.policy.hosts.write().unwrap().insert(h.to_lowercase());
             }
             log::trace("tsmux", &ctx.rid, || format!("TS segment seq={seq} → {}", crate::proxy::host_of(seg_url.as_str())));
+            let mut segment_failed = false;
             match fetch_with_retry(&ctx.client, seg_url.as_str(), &build_headers(&ctx.policy), ctx.read_timeout_ms, &ctx.rid, "ts-segment", MAX_UPSTREAM_RETRIES)
                 .await
             {
@@ -339,7 +340,10 @@ async fn ts_producer(
                         let chunk = match idle {
                             Some(d) => match tokio::time::timeout(d, s.next()).await {
                                 Ok(x) => x,
-                                Err(_) => break, // segment stalled — truncate + move on (partial tolerance)
+                                Err(_) => {
+                                    segment_failed = true;
+                                    break;
+                                }
                             },
                             None => s.next().await,
                         };
@@ -350,17 +354,39 @@ async fn ts_producer(
                                     break 'outer; // client disconnected — tear down (close reported below)
                                 }
                             }
-                            Some(Err(_)) => break, // truncated segment — tolerate, continue with the next
+                            Some(Err(_)) => {
+                                segment_failed = true;
+                                break;
+                            }
                             None => break,          // segment complete
                         }
                     }
                 }
                 _ => {
-                    // A segment fetch failed → a gap; report a transient upstream failure and keep going.
-                    log::warn("tsmux", &ctx.rid, || format!("TS segment seq={seq} fetch failed — gap (continuing)"));
-                    ctx.state.report(serde_json::json!({
-                        "kind": "upstream", "ok": false, "status": 0, "source": ctx.source, "entryUrl": ctx.entry,
-                    }));
+                    segment_failed = true;
+                }
+            }
+            if segment_failed {
+                // Do not leave the client socket to discover the broken segment. Re-resolve the current
+                // candidate (which lets DLHD rotate mirrors), then walk the group's backups if necessary.
+                // Restart from the new playlist's live edge because media sequence numbers are local to an
+                // upstream and cannot be compared across candidates.
+                log::warn("tsmux", &ctx.rid, || format!("TS segment seq={seq} failed — failing over without closing the client socket"));
+                ctx.state.report(serde_json::json!({
+                    "kind": "upstream", "ok": false, "status": 0, "source": ctx.source, "entryUrl": ctx.entry,
+                }));
+                match reresolve_media(&mut ctx).await {
+                    Some((u, b)) => {
+                        media_url = u;
+                        media_body = b;
+                        next_seq = -1;
+                        prev_media_seq = -1;
+                        continue 'outer;
+                    }
+                    None => {
+                        log::warn("failover", &ctx.rid, || "nothing reachable after segment failure — ending raw-TS stream".to_string());
+                        break 'outer;
+                    }
                 }
             }
             // Periodic byte flush → a smooth egress rate for a long-lived stream (not just one end burst).

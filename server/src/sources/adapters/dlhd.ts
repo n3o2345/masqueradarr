@@ -170,6 +170,10 @@ const dlhdAdapter: SourceAdapter = {
   // DaddyLive offers Player 1..N per channel (redundant embeds of the one feed) → the operator can prefer one
   // (source default + per-channel override) and resolveStream falls back through the rest. See resolveStream.ts.
   playerSelectable: true,
+  // DLHD's signed segment URLs and mirrors can disappear while a channel is being watched. On the external
+  // mount, prefer the continuous TS distributor: it keeps the client's one socket alive while it refreshes
+  // the master or walks a configured backup. Incompatible fMP4/AES feeds safely remain HLS.
+  preferContinuousTs: true,
   isEntryUrl(url: string) {
     try {
       const u = new URL(url);
