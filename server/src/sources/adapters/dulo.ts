@@ -1,6 +1,7 @@
-// dulo.tv source adapter. Originally ported from ../d-combine/sources/dulo/adapter.mjs.
+// dulo.gd source adapter (formerly dulo.tv — the site migrated domains; see DULO_ORIGIN below). Originally
+// ported from ../d-combine/sources/dulo/adapter.mjs.
 //
-// CHANGED (2026-06): dulo.tv reworked Live TV. The catalog (`/api/live-tv/channels`) no longer carries a
+// CHANGED (2026-06): dulo reworked Live TV. The catalog (`/api/live-tv/channels`) no longer carries a
 // stream URL — `source_url`/`direct_source` were removed, a `playable` boolean was added — and streams are
 // now minted per play behind a Supabase-authenticated, device-bound, expiring "playback session". So dulo
 // is no longer a token-free identity source: it is a STATEFUL, AUTHENTICATED, resolve-on-demand source
@@ -10,9 +11,10 @@
 //   · isEntryUrl()     → true for that sentinel
 //   · resolveStream()  → duloAuth.resolvePlayback(channelId) → the fresh playbackUrl (the real master)
 //
-// The resolved playbackUrl is served through dulo's own proxy (/proxy/hls/, gotcha.dulo.tv / live-gateway)
+// The resolved playbackUrl is served through dulo's own proxy (/proxy/hls/, gotcha.dulo.gd / live-gateway)
 // or an external host (tstrm.org / vixproxy). Its exact host can't be known until resolved, so the SSRF
-// gate allows *.dulo.tv plus any host LEARNED from a playlist we legitimately resolved/fetched
+// gate allows *.dulo.gd (plus the RETIRED *.dulo.tv, kept only as a fallback during the domain move — see
+// hostAllowed below) plus any host LEARNED from a playlist we legitimately resolved/fetched
 // (onPlaylistChildHost), the same dynamic-allow approach dlhd uses. Auth is established out-of-band by the
 // SPA capture flow → POST /api/sources/dulo/auth (see routes/sources.ts).
 
@@ -24,14 +26,17 @@ import type { SourceAdapter } from '../types.js';
 import type { SourceChannelDoc } from '../../models/SourceChannel.js';
 
 const SNAPSHOT = snapshotFile('dulo');
-const DULO_ORIGIN = 'https://dulo.tv';
-const DULO_API = process.env.DULO_API || 'https://dulo.tv/api/live-tv/channels';
+const DULO_ORIGIN = 'https://dulo.gd';
+const DULO_API = process.env.DULO_API || 'https://dulo.gd/api/live-tv/channels';
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const ENTRY_PREFIX = 'dulo://channel/';
 
-// Hosts allowed for direct (non-entry) proxy hops. *.dulo.tv is static; additional playbackUrl hosts are
-// learned at runtime from playlists we resolved/fetched (trust roots at dulo's authenticated response).
+// Hosts allowed for direct (non-entry) proxy hops. *.dulo.gd is static; *.dulo.tv is kept too (the site's
+// OLD domain, retired 2026 — dulo migrated to dulo.gd) purely as a fallback in case anything resolved
+// before the switch still points at it, or the old domain still redirects rather than being fully dead.
+// Additional playbackUrl hosts are learned at runtime from playlists we resolved/fetched (trust roots at
+// dulo's authenticated response).
 const EXTRA_HOSTS = new Set(
   (process.env.DULO_EXTRA_HOSTS || '')
     .split(',')
@@ -42,7 +47,14 @@ const dynamicHosts = new Set<string>();
 
 function hostAllowed(host: string): boolean {
   const h = host.toLowerCase();
-  return h === 'dulo.tv' || h.endsWith('.dulo.tv') || EXTRA_HOSTS.has(h) || dynamicHosts.has(h);
+  return (
+    h === 'dulo.gd' ||
+    h.endsWith('.dulo.gd') ||
+    h === 'dulo.tv' ||
+    h.endsWith('.dulo.tv') ||
+    EXTRA_HOSTS.has(h) ||
+    dynamicHosts.has(h)
+  );
 }
 
 function toIso(ts: unknown): string | null {

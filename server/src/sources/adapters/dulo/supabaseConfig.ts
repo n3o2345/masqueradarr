@@ -1,4 +1,5 @@
-// dulo.tv Supabase config resolution + RUNTIME DISCOVERY.
+// dulo.gd Supabase config resolution + RUNTIME DISCOVERY (formerly dulo.tv — see dulo.ts's header comment
+// on the domain migration).
 //
 // dulo gates Live TV behind a Supabase session that the server refreshes via the project's public
 // (non-secret) `apikey` — the opaque `sb_publishable_…` key baked into dulo's own frontend bundle. The
@@ -20,13 +21,16 @@
 
 import { logger } from '../../core/logger.js';
 
-const DULO_ORIGIN = 'https://dulo.tv';
+const DULO_ORIGIN = 'https://dulo.gd';
 const tag = 'dulo:auth';
 
-// Committed OFFLINE SEED — dulo's public Supabase config as last verified (2026-07-22). This is only the
-// last-resort fallback (same role as each adapter's committed *.snapshot.json): discoverSupabaseConfig()
-// supersedes it at runtime. Bump it only if discovery is ever blocked (bot-gate) AND dulo has migrated —
-// re-scrape from https://dulo.tv/assets/index-*.js.
+// Committed OFFLINE SEED — dulo's public Supabase config as last verified (2026-07-22, still under the
+// dulo.tv domain — see dulo.ts's header comment on the migration to dulo.gd). This is only the last-resort
+// fallback (same role as each adapter's committed *.snapshot.json): discoverSupabaseConfig() supersedes it
+// at runtime, and DULO_ORIGIN above already points discovery at the new domain, so a stale Supabase project
+// (dulo sometimes migrates BOTH together) self-heals automatically on the next key-gate 401 with no action
+// needed here. Bump this only if discovery is ever blocked (bot-gate) AND the project itself has ALSO
+// migrated — re-scrape from https://dulo.gd/assets/index-*.js.
 const SEED_SUPABASE_URL = 'https://wsudbodtjjfenprwsagd.supabase.co';
 const SEED_ANON_KEY = 'sb_publishable_521pnlSRNoR0xpBn6uiuHw_f78kT63_';
 

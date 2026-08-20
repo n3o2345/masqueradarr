@@ -1,6 +1,7 @@
-// DuloAuth — the stateful auth/session layer for the dulo.tv adapter.
+// DuloAuth — the stateful auth/session layer for the dulo.gd adapter (formerly dulo.tv — see dulo.ts's
+// header comment on the domain migration).
 //
-// dulo.tv reworked Live TV: the catalog no longer carries a stream URL. A stream is now minted per
+// dulo reworked Live TV: the catalog no longer carries a stream URL. A stream is now minted per
 // play by a Supabase-authenticated, device-bound, expiring "playback session". This module owns all of
 // that state (which the stateless SourceAdapter contract deliberately can't carry) and exposes a single
 // resolvePlayback(channelId) the adapter calls from resolveStream().
@@ -17,7 +18,7 @@
 // an untouched session died at the ~1h boundary. See the keepalive section at the bottom of the class.
 //
 // Only tokens are persisted (models/PlaylistAuth.ts) — never a password. The SPA captures the already
-// signed-in Supabase session from dulo.tv and hands us the tokens (see routes/sources.ts auth endpoints).
+// signed-in Supabase session from dulo.gd and hands us the tokens (see routes/sources.ts auth endpoints).
 //
 // NOTE (verify with a real account): Supabase rotates refresh tokens, so a server refresh and dulo's own
 // browser tab can invalidate each other's refresh token — re-capture may be needed occasionally. The
@@ -33,8 +34,8 @@ import { logger } from '../../core/logger.js';
 // discover the current pair from dulo's live bundle when a refresh 401s at the apikey gate. See supabaseConfig.ts.
 import { currentAnonKey, currentSupabaseUrl, discoverSupabaseConfig } from './supabaseConfig.js';
 
-const DULO_ORIGIN = 'https://dulo.tv';
-const DULO_BASE = process.env.DULO_API_BASE || 'https://dulo.tv/api';
+const DULO_ORIGIN = 'https://dulo.gd';
+const DULO_BASE = process.env.DULO_API_BASE || 'https://dulo.gd/api';
 const DEVICE_NAME = process.env.DULO_DEVICE_NAME || 'Masqueradarr';
 
 // Default UA when a session carries no captured UA (paste/handoff). Kept reasonably current for coherence

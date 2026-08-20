@@ -1,8 +1,9 @@
 // DuloLoginBrowser — a server-launched real Chromium, streamed into the SPA so the user signs in to the
-// ACTUAL dulo.tv login page rendered server-side. Their password goes straight into dulo and never touches
-// Masqueradarr (preserving the "tokens only, never a password" invariant in auth.ts / models/PlaylistAuth.ts). The
-// resulting Supabase session is intercepted from the page's network (or localStorage) and handed to
-// duloAuth.signIn() — the SAME capture pipeline the old bookmarklet fed, just without the bookmarklet.
+// ACTUAL dulo.gd login page rendered server-side (dulo migrated off dulo.tv in 2026 — see dulo.ts's header
+// comment). Their password goes straight into dulo and never touches Masqueradarr (preserving the "tokens
+// only, never a password" invariant in auth.ts / models/PlaylistAuth.ts). The resulting Supabase session is
+// intercepted from the page's network (or localStorage) and handed to duloAuth.signIn() — the SAME capture
+// pipeline the old bookmarklet fed, just without the bookmarklet.
 //
 // Transport: Chrome DevTools Protocol screencast (Page.startScreencast → screencastFrame JPEG over a
 // WebSocket) driven via page.createCDPSession(). No VNC — CDP screencast handles the streaming; the
@@ -10,7 +11,7 @@
 // Google" gate blocks headless. The same CDP session lets us read the token call off the page's network.
 //
 // Recon (2026-06-12, see the plan): dulo is a Vite SPA ("amri.gg"); its login is a full page at
-// https://dulo.tv/login (email/password + Google/Discord OAuth); it stores the Supabase session under a
+// https://dulo.gd/login (email/password + Google/Discord OAuth); it stores the Supabase session under a
 // CUSTOM `amri-*` localStorage key (NOT `sb-*-auth-token`); the Supabase URL/anon key live in the bundle and
 // are not exposed before sign-in. So capture is host-agnostic (match the GoTrue token path, read the apikey
 // header) and the localStorage fallback scans every key for a value carrying an access_token.
@@ -26,9 +27,9 @@ import { duloAuth, type CapturePayload } from './auth.js';
 import { logger } from '../../core/logger.js';
 
 const tag = 'dulo:login';
-const LOGIN_URL = 'https://dulo.tv/login';
-const LIVE_URL = 'https://dulo.tv/live'; // navigated to after sign-in to provoke the client's activate-device
-const APP_HOST = 'dulo.tv';
+const LOGIN_URL = 'https://dulo.gd/login';
+const LIVE_URL = 'https://dulo.gd/live'; // navigated to after sign-in to provoke the client's activate-device
+const APP_HOST = 'dulo.gd';
 const VIEWPORT_W = 1280;
 const VIEWPORT_H = 800;
 const HARD_CAP_MS = 5 * 60_000; // a session may not linger past this, even if the WS stays open

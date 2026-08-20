@@ -4,7 +4,8 @@
 // durable way to authenticate a social dulo account is to let the user sign in with their OWN real browser
 // (where Google just works) and hand the resulting Supabase session back to masqueradarr. This module mints a
 // short-lived, single-use PAIRING CODE and builds the one-click bookmarklet / console snippet the user runs on
-// dulo.tv to POST their session to the code-gated callback (routes/sources.ts).
+// dulo.gd (formerly dulo.tv — see dulo.ts's header comment) to POST their session to the code-gated callback
+// (routes/sources.ts).
 //
 // SECURITY: the bookmarklet carries only the pairing CODE (high-entropy, single-use, ~10-min TTL) + the
 // callback URL — NEVER the admin's session token. A leaked code can at most establish dulo auth on THIS
@@ -45,7 +46,7 @@ export const duloPairing = {
 // The client-side harvester: find the dulo Supabase session in localStorage, then POST it to the code-gated
 // callback — falling back to copying it to the clipboard when a direct POST can't work (mixed content on a
 // plain-http LAN instance, or a network/CORS failure). Built server-side with the code + callback baked in via
-// JSON.stringify (safe escaping). Runs on dulo.tv, so masqueradarr's CSP never applies to it.
+// JSON.stringify (safe escaping). Runs on dulo.gd, so masqueradarr's CSP never applies to it.
 function harvesterBody(code: string, callbackUrl: string): string {
   const CB = JSON.stringify(callbackUrl);
   const CODE = JSON.stringify(code);
@@ -54,7 +55,7 @@ function harvesterBody(code: string, callbackUrl: string): string {
     `function f(){for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i),v=localStorage.getItem(k);` +
     `if(v&&v.indexOf("access_token")>-1){try{var o=JSON.parse(v),s=o.currentSession||o.session||o;` +
     `if(s&&s.access_token)return s}catch(e){}}}return null}` +
-    `var s=f();if(!s){alert("Sign in to dulo.tv first, then run this again.");return}` +
+    `var s=f();if(!s){alert("Sign in to dulo.gd first, then run this again.");return}` +
     `function clip(){var t=JSON.stringify({access_token:s.access_token,refresh_token:s.refresh_token,expires_at:s.expires_at});` +
     `(navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(function(){` +
     `alert("Copied your dulo session. Paste it into masqueradarr under Paste session.")},function(){` +
@@ -68,7 +69,7 @@ function harvesterBody(code: string, callbackUrl: string): string {
   );
 }
 
-/** A draggable `javascript:` bookmarklet (drag to the bookmarks bar, click on dulo.tv). */
+/** A draggable `javascript:` bookmarklet (drag to the bookmarks bar, click on dulo.gd). */
 export function buildBookmarklet(code: string, callbackUrl: string): string {
   return 'javascript:' + encodeURIComponent(harvesterBody(code, callbackUrl));
 }
