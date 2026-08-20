@@ -181,18 +181,26 @@ pub async fn try_ts_response(
     )
 }
 
-/// Failover: walk the stream's candidates (a fresh resolve of the PINNED candidate first — Node re-runs
-/// resolveStream → reprobeMirror, the pre-failover mirror rotation — then, when failoverEnabled, the next
-/// failover children via the shared proxy.rs walk) and derive the media playlist again from the winning
-/// master. Swaps the producer onto the winning candidate's policy + client (FOG: a cross-provider child's
-/// headers live under ITS adapter's policy). `None` ⇒ nothing reachable (the producer ends).
-async fn reresolve_media(ctx: &mut TsContext) -> Option<(Url, String)> {
+/// Failover: walk the stream's candidates and derive the media playlist again from the winner. A failed
+/// media playlist gets one fresh resolve of its pinned candidate first (DLHD mirror rotation); a failed
+/// segment advances directly to the next configured source because the current candidate already proved it
+/// cannot deliver media. Swaps the producer onto the winning candidate's policy + client (FOG: a
+/// cross-provider child's headers live under ITS adapter's policy). `None` ⇒ nothing reachable (the producer
+/// ends).
+async fn reresolve_media(ctx: &mut TsContext, advance_candidate: bool) -> Option<(Url, String)> {
     // Milestone (≥2): a live raw-TS session lost its media playlist and is now failing over.
     log::info("failover", &ctx.rid, || "media playlist unreachable — walking failover candidates".to_string());
     let walk_children = ctx.policy.failover_enabled.load(Ordering::Relaxed);
     let on_definite = ctx.policy.failover_on_definite_error.load(Ordering::Relaxed);
     ctx.state.invalidate_target(&ctx.source, &ctx.entry);
-    let start = ctx.state.cursor_attempt(&ctx.source, &ctx.entry);
+    let cursor = ctx.state.cursor_attempt(&ctx.source, &ctx.entry);
+    // Never bypass the primary when failover is disabled. With it enabled, a segment failure advances to
+    // the next child; wrapping later permits recovery on the parent if every child is unavailable.
+    let start = if advance_candidate && walk_children {
+        cursor.saturating_add(1)
+    } else {
+        cursor
+    };
     let resp = match failover_walk(
         &ctx.state,
         &ctx.source,
@@ -202,7 +210,7 @@ async fn reresolve_media(ctx: &mut TsContext) -> Option<(Url, String)> {
         on_definite,
         None,
         start,
-        true,
+        advance_candidate && walk_children,
         &ctx.rid,
     )
     .await
@@ -283,7 +291,7 @@ async fn ts_producer(
                         }
                     }
                 }
-                _ => match reresolve_media(&mut ctx).await {
+                _ => match reresolve_media(&mut ctx, false).await {
                     Some((u, b)) => {
                         media_url = u;
                         media_body = b;
@@ -375,12 +383,17 @@ async fn ts_producer(
                 ctx.state.report(serde_json::json!({
                     "kind": "upstream", "ok": false, "status": 0, "source": ctx.source, "entryUrl": ctx.entry,
                 }));
-                match reresolve_media(&mut ctx).await {
+                match reresolve_media(&mut ctx, true).await {
                     Some((u, b)) => {
+                        // A replacement playlist carries its own sliding-window sequence numbers. Replaying
+                        // that window is what made the client see the previous few seconds again after every
+                        // recovery. Move our cursor immediately beyond its current tail instead: the next
+                        // poll emits only a newly-produced segment from the recovered live feed.
+                        let replacement = parse_media_playlist(&b);
                         media_url = u;
                         media_body = b;
-                        next_seq = -1;
-                        prev_media_seq = -1;
+                        next_seq = replacement.media_sequence + replacement.segments.len() as i64;
+                        prev_media_seq = replacement.media_sequence;
                         continue 'outer;
                     }
                     None => {
