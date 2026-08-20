@@ -118,7 +118,7 @@ sourcesRouter.post('/api/sources/:id/provision', async (req, res, next) => {
 
 // ── dulo Live TV authentication ───────────────────────────────────────────────
 // dulo gates Live TV streams behind a Supabase session (no static stream URLs). The SPA captures the
-// already signed-in session from dulo.tv and POSTs the tokens here — only tokens are stored, never a
+// already signed-in session from dulo.gd (formerly dulo.tv) and POSTs the tokens here — only tokens are stored, never a
 // password (see sources/adapters/dulo/auth.ts). Read auth state via GET /api/sources/dulo/status.
 sourcesRouter.post('/api/sources/dulo/auth', async (req, res, next) => {
   try {
@@ -175,14 +175,14 @@ sourcesRouter.post('/api/sources/dulo/auth/pair', (req, res) => {
     code,
     expiresAt,
     callbackUrl,
-    duloUrl: 'https://dulo.tv',
+    duloUrl: 'https://dulo.gd',
     bookmarklet: buildBookmarklet(code, callbackUrl),
     snippet: buildSnippet(code, callbackUrl),
   });
 });
 
-// Cross-origin CORS for the callback: the bookmarklet runs on dulo.tv and POSTs here. No cookies/credentials
-// are used (the pairing code is the bearer), so echoing the Origin is safe.
+// Cross-origin CORS for the callback: the bookmarklet runs on dulo.gd (formerly dulo.tv) and POSTs here. No
+// cookies/credentials are used (the pairing code is the bearer), so echoing the Origin is safe.
 function setPairCors(req: Request, res: Response): void {
   res.setHeader('Access-Control-Allow-Origin', (req.headers.origin as string) || '*');
   res.setHeader('Vary', 'Origin');

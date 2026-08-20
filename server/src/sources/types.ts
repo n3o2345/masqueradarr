@@ -59,7 +59,7 @@ export const DEFAULT_BUILTIN_META: BuiltinPlaylistMeta = {
 export interface SourceProxy {
   /** Headers to inject on every upstream hop (dulo: Origin; dlhd: Referer+UA). */
   upstreamHeaders(url: string): Record<string, string>;
-  /** SSRF gate for direct hops (dulo: *.dulo.tv; dlhd: dynamic Set; direct/import: any http(s), private IPs allowed for LAN sources). */
+  /** SSRF gate for direct hops (dulo: *.dulo.gd [+ *.dulo.tv fallback]; dlhd: dynamic Set; direct/import: any http(s), private IPs allowed for LAN sources). */
   isAllowedUpstream(url: string): boolean;
   /**
    * Whether the Rust sidecar's SSRF guard may resolve/fetch a private, loopback, or link-local upstream IP
@@ -127,13 +127,6 @@ export interface SourceAdapter {
    * the SPA hides the picker. Purely a capability flag; the resolution logic lives in the adapter.
    */
   playerSelectable?: boolean;
-  /**
-   * Prefer the external raw-TS distributor whenever the upstream is compatible. This keeps one client
-   * socket open while the producer re-resolves/fails over, instead of making an HLS client discover the
-   * switch on a later playlist poll. DLHD sets this because its signed segment URLs rotate frequently.
-   * fMP4/AES streams still fall back to normal HLS automatically.
-   */
-  preferContinuousTs?: boolean;
   /** Does this URL need server-side resolution before proxying? (dulo/common: false; dlhd: watch.php) */
   isEntryUrl(url: string): boolean;
   /**

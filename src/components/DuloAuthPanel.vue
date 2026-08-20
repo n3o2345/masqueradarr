@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // dulo Live TV authentication panel (Settings).
 //
-// dulo.tv gates Live TV behind a signed-in Supabase session; the server resolves each stream on demand
+// dulo.gd (formerly dulo.tv) gates Live TV behind a signed-in Supabase session; the server resolves each stream on demand
 // (server/src/sources/adapters/dulo/auth.ts). The user signs in through a server-streamed real browser
 // (DuloLoginDrawer) on dulo's own login page — their password goes straight to dulo, never to TVApp2 — and
 // the server intercepts the session and stores only the tokens (never a password), refreshing them
@@ -280,7 +280,7 @@ onUnmounted(() => {
     </div>
 
     <div class="muted" style="font-size: var(--fs-xs); margin: 6px 0 14px;">
-      dulo.tv now streams Live TV only to signed-in accounts and mints each stream on demand. Connect a
+      dulo.gd now streams Live TV only to signed-in accounts and mints each stream on demand. Connect a
       dulo account once — TVApp2 stores only the session tokens (never your password) and refreshes them
       automatically.
     </div>
@@ -319,7 +319,7 @@ onUnmounted(() => {
       <div class="muted" style="font-size: var(--fs-sm); color: var(--text-1); line-height: 1.6;">
         Sign in with <b>your own browser</b> — where Google &amp; Discord work normally — then hand the session
         back with one click. This is the most reliable way to connect a social account. Afterwards simply
-        <b>close the dulo tab — don't sign out</b>: signing out of dulo.tv revokes the session you just handed
+        <b>close the dulo tab — don't sign out</b>: signing out of dulo.gd revokes the session you just handed
         over. The server keeps it refreshed automatically from then on.
       </div>
 
@@ -332,11 +332,11 @@ onUnmounted(() => {
 
       <div v-if="pasteOpen" class="col" style="gap: 8px;">
         <div class="muted" style="font-size: var(--fs-xs);">
-          Manual alternative: sign in on dulo.tv in your own browser, then open DevTools → Application → Local
+          Manual alternative: sign in on dulo.gd in your own browser, then open DevTools → Application → Local
           Storage → copy the value of the key starting with <code class="mono">amri-</code> (any key whose value
           contains <code class="mono">access_token</code>) and paste it here. Best captured from a
           <b>private/incognito window</b>; when done, <b>close the window without signing out</b> — signing out
-          of dulo.tv revokes the pasted session. Once pasted, the server keeps the session alive automatically.
+          of dulo.gd revokes the pasted session. Once pasted, the server keeps the session alive automatically.
         </div>
         <textarea v-model="pasteText" rows="4" placeholder='{"access_token":"…","refresh_token":"…","expires_at":…}'
                   class="input mono" style="width: 100%; font-size: 11px; padding: 8px; resize: vertical;" />
@@ -373,9 +373,9 @@ onUnmounted(() => {
           <a :href="pairing.bookmarklet" class="mono" draggable="true" style="color: var(--accent, var(--text-0)); text-decoration: underline; cursor: grab;" @click.prevent>↧ Connect dulo → masqueradarr</a>
           <Btn variant="ghost" size="sm" @click="copyText(pairing.bookmarklet)">copy</Btn>
         </li>
-        <li><a :href="pairing.duloUrl" target="_blank" rel="noopener" style="color: var(--accent, var(--text-0));">Open dulo.tv</a> and sign in (Google / Discord work in your own browser).</li>
+        <li><a :href="pairing.duloUrl" target="_blank" rel="noopener" style="color: var(--accent, var(--text-0));">Open dulo.gd</a> and sign in (Google / Discord work in your own browser).</li>
         <li>
-          On dulo.tv, click that bookmark.
+          On dulo.gd, click that bookmark.
           <span class="muted">No bookmarks bar?</span>
           <Btn variant="ghost" size="sm" @click="copyText(pairing.snippet)">Copy console snippet</Btn>
           <span class="muted">and paste it into DevTools → Console.</span>

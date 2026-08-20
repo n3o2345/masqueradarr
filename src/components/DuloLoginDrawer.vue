@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // dulo streamed-login drawer. Opens a WebSocket to the server's /api/dulo/login-stream, which screencasts a
-// real server-side Chromium sitting on the dulo.tv login page (CDP JPEG frames). We paint frames into a
+// real server-side Chromium sitting on the dulo.gd login page (CDP JPEG frames). We paint frames into a
 // <canvas> and forward the user's mouse/keyboard back, scaled to the remote viewport. The user signs in on
 // the ACTUAL dulo page — their password never reaches TVApp2; the server intercepts the Supabase session
 // and stores only the tokens. See server/src/sources/adapters/dulo/loginBrowser.ts and restapi-sources.md.
@@ -180,7 +180,7 @@ onBeforeUnmount(() => {
         <div style="flex: 1;">
           <div style="font-weight: 600; font-size: 15px;">Sign in to dulo</div>
           <div class="muted" style="font-size: var(--fs-xs); margin-top: 2px;">
-            This is dulo.tv — your password goes straight to dulo, never to TVApp2.
+            This is dulo.gd — your password goes straight to dulo, never to TVApp2.
           </div>
         </div>
         <div class="row" style="gap: 8px; align-items: center;">

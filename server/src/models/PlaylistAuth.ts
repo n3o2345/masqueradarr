@@ -3,7 +3,7 @@ import { Schema, model } from 'mongoose';
 // PlaylistAuth (playlistauths) — the per-playlist authenticated-session store. One row per playlist that
 // requires authentication to stream; the row traces back to its owning playlist via `playlistSource`.
 //
-// dulo.tv is the first (and today only) such source: it removed the static `source_url` from its catalog
+// dulo.gd (formerly dulo.tv) is the first (and today only) such source: it removed the static `source_url` from its catalog
 // and mints Live TV streams per play behind a Supabase JWT (POST /api/live-tv/playback-session). This
 // collection persists the captured session so the server can resolve streams across restarts. **Only
 // tokens are stored — never the user's password**: the SPA captures the already-signed-in session from
