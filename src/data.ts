@@ -55,6 +55,10 @@ export interface Playlist {
   // own logo instead of the channel's own logoUrl, wherever the guide has one. Set via PUT /api/playlists/:id
   // { useEpgLogo }. Absent on legacy rows (treat undefined as false).
   useEpgLogo?: boolean;
+  // Per-playlist export channel ordering: 'name' (default — group, then alphabetical) or 'number' (group,
+  // then numeric channel number). Set via PUT /api/playlists/:id { channelSortMode }. Absent on legacy rows
+  // (treat undefined as 'name').
+  channelSortMode?: 'name' | 'number';
   // Per-(Custom-)playlist toggle for the Xtream Codes API surface (server routes/xtreamEmulation.ts's
   // /xc/:id/... scope). Off by default — set via PUT /api/playlists/:id { xtreamEnabled }. Meaningless for a
   // Global-endpoint playlist (Global is always reachable at the root /player_api.php, no toggle needed).

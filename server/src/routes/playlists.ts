@@ -284,6 +284,14 @@ playlistsRouter.put('/:id', requireAdmin, async (req, res, next) => {
       }
       $set.useEpgLogo = body.useEpgLogo;
     }
+    // Per-playlist export channel ordering ('name' | 'number') — read at export time by
+    // m3u/compose.ts (activeChannels), never touched by a sync. See the Playlist model field's doc comment.
+    if (body.channelSortMode !== undefined) {
+      if (body.channelSortMode !== 'name' && body.channelSortMode !== 'number') {
+        return res.status(400).json({ error: "channelSortMode must be 'name' or 'number'" });
+      }
+      $set.channelSortMode = body.channelSortMode;
+    }
     // Per-playlist Xtream Codes API toggle (routes/xtreamEmulation.ts's /xc/:customId/... scope). No
     // recompose/resync needed on change — it's read live, per-request, by the Xtream router, not baked into
     // any exported file.
@@ -306,7 +314,7 @@ playlistsRouter.put('/:id', requireAdmin, async (req, res, next) => {
     if (!Object.keys($set).length) {
       return res.status(400).json({
         error:
-          'no editable fields provided (name, state, pinned, endpoint, url, interval, auto, tags, applyTagsToChannels, useEpgLogo, xtreamEnabled, hdhrProfile)',
+          'no editable fields provided (name, state, pinned, endpoint, url, interval, auto, tags, applyTagsToChannels, useEpgLogo, channelSortMode, xtreamEnabled, hdhrProfile)',
       });
     }
 
@@ -384,13 +392,14 @@ playlistsRouter.put('/:id', requireAdmin, async (req, res, next) => {
       } catch (err) {
         logger.warn('m3u', `reconcile after playlist edit failed: ${(err as Error).message}`);
       }
-    } else if (body.useEpgLogo !== undefined) {
-      // Toggling the logo source alone doesn't change endpoint/state/url, but every export surface this
-      // playlist feeds needs a recompose so the swap shows up without waiting for the next scheduled sync.
+    } else if (body.useEpgLogo !== undefined || body.channelSortMode !== undefined) {
+      // Toggling the logo source or the export sort order alone doesn't change endpoint/state/url, but every
+      // export surface this playlist feeds needs a recompose so the change shows up without waiting for the
+      // next scheduled sync.
       try {
         await composeM3u(doc.id);
       } catch (err) {
-        logger.warn('m3u', `recompose after useEpgLogo toggle failed: ${(err as Error).message}`);
+        logger.warn('m3u', `recompose after useEpgLogo/channelSortMode toggle failed: ${(err as Error).message}`);
       }
     } else if (body.hdhrProfile !== undefined && before.hdhrProfile !== doc.hdhrProfile) {
       // Re-fetch the device lineup so every channel's streamEntryUrl is rebuilt with the new profile's path

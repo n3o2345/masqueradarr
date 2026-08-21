@@ -105,6 +105,13 @@ const PlaylistSchema = new Schema(
     // source) carries a better one. Falls back to logoUrl when the guide has no icon for that channel. User-owned
     // — a sync never writes it. See m3u/compose.ts buildLogoOverrides + m3u/serialize.ts channelToExtinf.
     useEpgLogo: { type: Boolean, default: false },
+    // Per-playlist EXPORT channel ordering: 'name' (default — group, then alphabetical by tvg_name, the
+    // long-standing behavior) or 'number' (group, then numeric tvg-chno). channelNo is free-text/user-
+    // editable (see PlaylistChannel.ts) — a channel with none, or a non-numeric one, sorts to the END of its
+    // group rather than erroring, falling back to name order among itself. Read by m3u/compose.ts's
+    // activeChannels(); applies to every export surface (Global union, per-user files, Xtream get.php) that
+    // sources channels through it. User-owned — a sync never writes it.
+    channelSortMode: { type: String, enum: ['name', 'number'], default: 'name' },
     // Per-(Custom-)playlist toggle for the Xtream Codes API surface (routes/xtreamEmulation.ts's
     // /xc/:customId/... scope). Off by default — an operator must explicitly opt a Custom playlist in before
     // it's reachable via Xtream login at all, independent of a user's allowedCustomPlaylists grant (both must

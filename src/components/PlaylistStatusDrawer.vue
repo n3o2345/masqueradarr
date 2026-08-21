@@ -338,6 +338,15 @@ function setUseEpgLogo(v: boolean) {
   save({ useEpgLogo: v });
 }
 
+// Export channel ordering — 'name' (group, then alphabetical — the long-standing default) or 'number'
+// (group, then numeric channel number; a channel with no usable number falls to the end of its group). The
+// server recomposes the exports on change so the reorder is visible immediately, same as useEpgLogo above.
+const channelSortByNumber = ref(props.playlist.channelSortMode === 'number');
+function setChannelSortByNumber(v: boolean) {
+  channelSortByNumber.value = v;
+  save({ channelSortMode: v ? 'number' : 'name' });
+}
+
 // Per-playlist Xtream Codes API toggle — only meaningful for a Custom-endpoint playlist (Global is always
 // reachable at the root /player_api.php, no toggle needed). No recompose needed on change — the server reads
 // the flag live, per request.
@@ -524,6 +533,24 @@ function onCustomPath(v: string) {
               </div>
             </div>
             <Toggle :on="useEpgLogo" @change="setUseEpgLogo" />
+          </div>
+        </div>
+
+        <div class="divider" />
+
+        <!-- Export channel ordering — ABC (default, group then alphabetical) or 123 (group then numeric
+             channel number; a channel with no usable number falls to the end of its group). -->
+        <div class="form-row">
+          <div class="row" style="align-items: center; gap: 10px;">
+            <div style="flex: 1;">
+              <div class="field-lbl" style="margin: 0;">Sort channels by number</div>
+              <div class="muted" style="font-size: var(--fs-xs); margin-top: 2px;">
+                {{ channelSortByNumber
+                  ? 'Exported channels are ordered by channel number within each group.'
+                  : 'Exported channels are ordered alphabetically within each group. Turn on to sort by number instead.' }}
+              </div>
+            </div>
+            <Toggle :on="channelSortByNumber" @change="setChannelSortByNumber" />
           </div>
         </div>
 

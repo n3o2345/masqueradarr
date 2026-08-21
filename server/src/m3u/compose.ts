@@ -51,6 +51,19 @@ export interface PlaylistLite {
   // Per-playlist Xtream Codes API toggle — read by routes/xtreamEmulation.ts's Custom-scoped routes via the
   // `playlist` this function already returns, rather than a second query.
   xtreamEnabled?: boolean;
+  // Per-playlist export ordering — see the Playlist model field's doc comment. Read by activeChannels() via
+  // playlistActiveChannels() below.
+  channelSortMode?: 'name' | 'number';
+}
+
+// A channel's numeric sort key for channelSortMode:'number' — channelNo is free-text/user-editable (see
+// PlaylistChannel.ts), so a raw Mongo string sort would put "10" before "2"; this parses it as a float
+// instead. Anything with no usable number (null, blank, non-numeric) sorts to +Infinity — the END of its
+// group — rather than erroring or landing arbitrarily among the numbered ones.
+function channelNoKey(no: string | null | undefined): number {
+  if (!no) return Number.POSITIVE_INFINITY;
+  const n = parseFloat(no);
+  return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
 }
 
 // Registry order index for the cross-source Global union (then group → tvg_name within each source).
@@ -69,13 +82,26 @@ export async function resolveDomain(): Promise<string> {
 // deliberately shows them. `$ne: 'child'` keeps ungrouped docs whether the field is null OR missing
 // entirely (pre-feature docs). composeGuide runs off this same returned set, so children drop from the
 // exported guide automatically.
-async function activeChannels(source: string): Promise<PlaylistChannelDoc[]> {
-  return PlaylistChannel.find(
+//
+// `sortMode:'number'` re-sorts WITHIN each group by parsed channelNo (see channelNoKey) instead of name —
+// applied as a second, in-memory pass rather than at the DB level, since a raw Mongo sort can't parse
+// free-text channelNo numerically. Array.prototype.sort is stable (spec-guaranteed since ES2019), so the
+// DB's group→tvg_name order survives as the tiebreaker for equal/missing channel numbers with no extra work.
+async function activeChannels(
+  source: string,
+  sortMode: 'name' | 'number' = 'name',
+): Promise<PlaylistChannelDoc[]> {
+  const rows = await PlaylistChannel.find(
     { source, status: 'Active', failoverRole: { $ne: 'child' } },
     { _id: 0 },
   )
     .sort({ group: 1, tvg_name: 1 })
     .lean<PlaylistChannelDoc[]>();
+  if (sortMode !== 'number') return rows;
+  return rows.sort((a, b) => {
+    if (a.group !== b.group) return (a.group ?? '').localeCompare(b.group ?? '');
+    return channelNoKey(a.channelNo) - channelNoKey(b.channelNo);
+  });
 }
 
 // The TWO-LEVEL inclusion gate (SKILL.md §5), applied as a single boundary so every compose surface
@@ -93,7 +119,7 @@ export async function playlistActiveChannels(playlist: PlaylistLite): Promise<Pl
   if (playlist.state === false) return []; // (1) Inactive playlist → exclude its entire channel set
   const key = channelSourceKey(playlist);
   if (!key) return [];
-  return activeChannels(key); // (2) Active playlist → its Active channels only
+  return activeChannels(key, playlist.channelSortMode); // (2) Active playlist → its Active channels only
 }
 
 // The PlaylistChannel `source` key that holds a playlist's channels is shared with the routes (m3u/paths.ts):
@@ -224,13 +250,13 @@ export async function channelsForUser(user: UserHydrated): Promise<PlaylistChann
   if (!user.streamTokenEnabled) return [];
   const gplaylists = (await Playlist.find(
     { endpoint: 'global', state: true, source: { $ne: null } },
-    { id: 1, source: 1 },
-  ).lean()) as Array<{ id: string; source: string }>;
+    { id: 1, source: 1, channelSortMode: 1 },
+  ).lean()) as Array<{ id: string; source: string; channelSortMode?: 'name' | 'number' }>;
   gplaylists.sort((a, b) => (sourceOrder.get(a.source) ?? 999) - (sourceOrder.get(b.source) ?? 999));
   const visible =
     user.role === 'admin' ? gplaylists : gplaylists.filter((p) => (user.allowedPlaylists ?? []).includes(p.id));
   const channels: PlaylistChannelDoc[] = [];
-  for (const p of visible) channels.push(...(await activeChannels(p.source)));
+  for (const p of visible) channels.push(...(await activeChannels(p.source, p.channelSortMode)));
   return channels;
 }
 
@@ -338,12 +364,13 @@ export async function composeUserFiles(user: UserHydrated): Promise<void> {
 
   const gplaylists = (await Playlist.find(
     { endpoint: 'global', state: true, source: { $ne: null } },
-    { id: 1, source: 1, useEpgLogo: 1 },
-  ).lean()) as Array<{ id: string; source: string; useEpgLogo?: boolean }>;
+    { id: 1, source: 1, useEpgLogo: 1, channelSortMode: 1 },
+  ).lean()) as Array<{ id: string; source: string; useEpgLogo?: boolean; channelSortMode?: 'name' | 'number' }>;
   gplaylists.sort((a, b) => (sourceOrder.get(a.source) ?? 999) - (sourceOrder.get(b.source) ?? 999));
   const useEpgLogoBySource = new Map(gplaylists.map((p) => [p.source, p.useEpgLogo === true]));
   const bySource = new Map<string, PlaylistChannelDoc[]>();
-  for (const p of gplaylists) if (!bySource.has(p.source)) bySource.set(p.source, await activeChannels(p.source));
+  for (const p of gplaylists)
+    if (!bySource.has(p.source)) bySource.set(p.source, await activeChannels(p.source, p.channelSortMode));
   const globalOverrides = await buildLogoOverrides(
     [...bySource.values()].flat(),
     (ch) => useEpgLogoBySource.get(ch.source) ?? false,
@@ -394,14 +421,15 @@ export async function composeGlobal(): Promise<ComposeResult> {
   const domain = await resolveDomain();
   const playlists = (await Playlist.find(
     { endpoint: 'global', state: true, source: { $ne: null } },
-    { id: 1, source: 1, useEpgLogo: 1 },
-  ).lean()) as Array<{ id: string; source: string; useEpgLogo?: boolean }>;
+    { id: 1, source: 1, useEpgLogo: 1, channelSortMode: 1 },
+  ).lean()) as Array<{ id: string; source: string; useEpgLogo?: boolean; channelSortMode?: 'name' | 'number' }>;
   playlists.sort((a, b) => (sourceOrder.get(a.source) ?? 999) - (sourceOrder.get(b.source) ?? 999));
   const useEpgLogoBySource = new Map(playlists.map((p) => [p.source, p.useEpgLogo === true]));
 
   // Cache each source's Active channels once — reused by the shared guide and every per-user file.
   const bySource = new Map<string, PlaylistChannelDoc[]>();
-  for (const p of playlists) if (!bySource.has(p.source)) bySource.set(p.source, await activeChannels(p.source));
+  for (const p of playlists)
+    if (!bySource.has(p.source)) bySource.set(p.source, await activeChannels(p.source, p.channelSortMode));
 
   const all: PlaylistChannelDoc[] = [];
   for (const p of playlists) all.push(...(bySource.get(p.source) ?? []));
