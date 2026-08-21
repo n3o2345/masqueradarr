@@ -97,6 +97,13 @@ export interface SourceAdapter {
    * channels live under their import Playlist's id with origin:'direct' for routing. Absent → a normal source.
    */
   synthetic?: boolean;
+  /**
+   * When true, this source's playback is a continuous raw MPEG-TS stream (not segmented HLS) — read by
+   * proxy/resolveSeam.ts (both the primary grant and the failover-child grant) to build the `preferContinuousTs`
+   * field the Rust data plane's origin ingest uses to pick its resolve/ingest path. Absent → false (segmented
+   * HLS, the default for every other source). dlhd sets this true.
+   */
+  preferContinuousTs?: boolean;
   /** Fetch/scrape raw listings → { raw, meta }; falls back to a bundled snapshot when offline. */
   listChannels(): Promise<RawListing>;
   /** Map one raw record → one normalized document, or null to drop it. */
