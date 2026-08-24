@@ -50,6 +50,16 @@ const TRANSIENT_BACKOFF_MS = 60_000; // after a transient refresh failure, don't
 // deliberately distinct from REFRESH_MARGIN_MS (the lazy play-path net): with the keepalive armed the
 // lazy margin only matters when the process was down/asleep across the expiry boundary.
 const KEEPALIVE_LEAD_MS = Number(process.env.DULO_REFRESH_LEAD_MS || 300_000); // 5 min
+// KEEPALIVE_MAX_INTERVAL_MS is a hard CEILING on how long the keepalive ever waits between touches,
+// independent of what the JWT's own `exp` claims. scheduleKeepalive's `at` is normally driven purely by
+// `expiresAt - KEEPALIVE_LEAD_MS` (a JWT that says it's good for an hour gets touched ~5 min before that
+// hour is up) — but dulo appears to enforce its OWN account/device-level session policy that can invalidate
+// an untouched session sooner than the JWT's nominal lifetime says, which shows up as a genuine
+// `reauth_required` even though the token hadn't technically expired yet. Capping the interval at 45 min
+// (regardless of a longer `exp`) touches the session before that stricter, undocumented window closes; a
+// JWT with a SHORTER real lifetime than 45 min is unaffected — Math.min below only ever pulls the schedule
+// earlier, never later.
+const KEEPALIVE_MAX_INTERVAL_MS = Number(process.env.DULO_KEEPALIVE_MAX_INTERVAL_MS || 2_700_000); // 45 min
 const KEEPALIVE_MIN_DELAY_MS = 5_000; // never arm closer than now+5s (past-due / clock-skew clamp)
 const KEEPALIVE_MAX_ARM_MS = 43_200_000; // re-check at least every 12h; also dodges Node's 2^31−1 setTimeout overflow (fires immediately)
 const tag = 'dulo:auth';
@@ -139,6 +149,11 @@ class PlaylistAuthState {
   private keepaliveEnabled = false;
   private keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
   private keepaliveNextAt: number | null = null;
+  // True when the CURRENTLY ARMED timer was aimed by the KEEPALIVE_MAX_INTERVAL_MS ceiling rather than the
+  // JWT's own exp-minus-lead — read by keepaliveTick() to tell "woke early, nothing to do yet" apart from
+  // "woke deliberately early because the ceiling says touch it now regardless of what the JWT claims." See
+  // KEEPALIVE_MAX_INTERVAL_MS's doc comment for why the ceiling exists at all.
+  private armedForCeiling = false;
 
   constructor(private readonly source: string) {}
 
@@ -305,7 +320,7 @@ class PlaylistAuthState {
     const s = await this.load();
     const firstKey = currentAnonKey(s.anonKey);
     if (!s.refreshToken || !s.supabaseUrl) {
-      await this.save({ status: 'reauth_required', lastError: 'cannot refresh (missing refresh token / supabase url)' });
+      await this.save({ status: 'reauth_required', blockReason: null, lastError: 'cannot refresh (missing refresh token / supabase url)' });
       throw new Error('cannot refresh session — re-authenticate with dulo');
     }
     const post = (key: string) =>
@@ -370,7 +385,7 @@ class PlaylistAuthState {
       // Permanent rejection (e.g. 400 invalid_grant / refresh_token_not_found / already-used) — the refresh
       // token is dead (often a rotation collision with the user's own dulo tab). Prompt a precise re-auth.
       const body = (await res.text().catch(() => '')).slice(0, 200);
-      await this.save({ status: 'reauth_required', refreshBackoffUntil: null, lastError: `refresh rejected (HTTP ${res.status}): ${body || 'no body'}` });
+      await this.save({ status: 'reauth_required', refreshBackoffUntil: null, blockReason: null, lastError: `refresh rejected (HTTP ${res.status}): ${body || 'no body'}` });
       throw new Error(`session refresh failed (HTTP ${res.status}) — re-authenticate`);
     }
     const data = (await res.json().catch(() => ({}))) as {
@@ -380,7 +395,7 @@ class PlaylistAuthState {
       expires_in?: number;
     };
     if (!data.access_token) {
-      await this.save({ status: 'reauth_required', refreshBackoffUntil: null, lastError: 'refresh returned no access_token' });
+      await this.save({ status: 'reauth_required', refreshBackoffUntil: null, blockReason: null, lastError: 'refresh returned no access_token' });
       throw new Error('session refresh returned no token — re-authenticate');
     }
     const expiresAt =
@@ -396,6 +411,7 @@ class PlaylistAuthState {
       anonKey: usedKey, // persists a rotated-key correction (a no-op when the stored key already worked)
       refreshBackoffUntil: null,
       status: 'active',
+      blockReason: null,
       lastError: null,
     });
     logger.ok(tag, usedKey !== firstKey ? 'refreshed access token (recovered rotated anon key)' : 'refreshed access token');
@@ -426,7 +442,7 @@ class PlaylistAuthState {
         if (fresh) res = await post(fresh);
       }
       if (res.status === 401) {
-        await this.save({ status: 'reauth_required', deviceBound: false, lastError: 'activate-device 401 (after forced token refresh)' });
+        await this.save({ status: 'reauth_required', deviceBound: false, blockReason: null, lastError: 'activate-device 401 (after forced token refresh)' });
         throw new Error('device activation unauthorized — re-authenticate');
       }
       if (!res.ok) {
@@ -441,6 +457,7 @@ class PlaylistAuthState {
         deviceName: data.device?.device_name ?? s.deviceName ?? DEVICE_NAME,
         deviceBound: true,
         status: 'active',
+        blockReason: null,
       });
       logger.ok(tag, `device activated (${data.device?.id ?? 'no id returned'})`);
     })().finally(() => {
@@ -477,7 +494,7 @@ class PlaylistAuthState {
       if (fresh) res = await post(fresh);
     }
     if (res.status === 401) {
-      await this.save({ status: 'reauth_required', lastError: 'playback-session 401 (after forced token refresh)' });
+      await this.save({ status: 'reauth_required', blockReason: null, lastError: 'playback-session 401 (after forced token refresh)' });
       throw new Error('playback unauthorized — re-authenticate with dulo');
     }
     if (res.status === 403) {
@@ -577,7 +594,16 @@ class PlaylistAuthState {
       this.disarmKeepalive();
       return;
     }
-    let at = s.expiresAt - KEEPALIVE_LEAD_MS;
+    // Ceiling first (never wait longer than KEEPALIVE_MAX_INTERVAL_MS from now, regardless of a longer JWT
+    // `exp`), THEN the backoff override below — a pending transient-failure backoff can still push `at`
+    // later than the ceiling when it must (retrying sooner would just hit the same backoff wall again).
+    // armedForCeiling records which one WON, ignoring the backoff nudge (a short, ~60s bump can't plausibly
+    // cross the gap into the JWT's own lead window) — keepaliveTick() reads it to know whether waking up
+    // still outside that lead window is expected (the ceiling) or a bug (an early/duplicate timer fire).
+    const ceilingAt = Date.now() + KEEPALIVE_MAX_INTERVAL_MS;
+    const leadAt = s.expiresAt - KEEPALIVE_LEAD_MS;
+    let at = Math.min(leadAt, ceilingAt);
+    this.armedForCeiling = ceilingAt <= leadAt;
     if (s.refreshBackoffUntil != null && s.refreshBackoffUntil > Date.now()) at = Math.max(at, s.refreshBackoffUntil + 1_000);
     const delay = Math.min(Math.max(at - Date.now(), KEEPALIVE_MIN_DELAY_MS), KEEPALIVE_MAX_ARM_MS);
     this.disarmKeepalive();
@@ -615,8 +641,17 @@ class PlaylistAuthState {
     }
     if (!this.keepaliveEnabled) return;
     if (!s.accessToken || !s.refreshToken || s.status === 'signed_out' || s.status === 'reauth_required') return;
-    if (s.expiresAt == null || s.expiresAt - Date.now() > KEEPALIVE_LEAD_MS) {
-      this.scheduleKeepalive(s); // woke early (12h recheck / a play-path refresh rotated meanwhile) — re-aim
+    // Refresh when EITHER the JWT's own lead window says so, OR the 45-min ceiling is why we woke up (this
+    // beat can be here well inside the JWT's nominal lead window on a longer-lived token — scheduleKeepalive
+    // armed it early ON PURPOSE per KEEPALIVE_MAX_INTERVAL_MS, and treating that as "woke early" here would
+    // just re-arm for the SAME ceiling and never actually touch the session, silently undoing the whole
+    // point of the cap). Reads `armedForCeiling` (set by the scheduleKeepalive call that armed THIS timer)
+    // rather than re-deriving "why" from `s` a second time — `s` is freshly re-read here and only tells us
+    // the CURRENT lead-window state, not which reason the now-firing timer was actually armed for.
+    const insideLeadWindow = s.expiresAt != null && s.expiresAt - Date.now() <= KEEPALIVE_LEAD_MS;
+    const pastCeiling = this.armedForCeiling;
+    if (s.expiresAt == null || (!insideLeadWindow && !pastCeiling)) {
+      this.scheduleKeepalive(s); // genuinely woke early (12h recheck / a play-path refresh rotated meanwhile)
       return;
     }
     logger.info(tag, 'keepalive: refreshing access token ahead of expiry');
