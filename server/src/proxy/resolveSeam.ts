@@ -6,6 +6,55 @@ import { noteFailoverServing } from '../sources/core/streamTelemetry.js';
 import { logger } from '../sources/core/logger.js';
 import { logMilestone, logTrace } from '../logs/tier.js';
 
+// FOG-5: deterministic per-EPISODE shuffle of a failover group's backup order, so a repeatedly-failing
+// primary doesn't hammer the SAME next-in-list backup every single time it goes down — see
+// buildFailoverGrant's use below for why "deterministic" matters here at all.
+//
+// mulberry32 — a tiny, fast, seedable PRNG (public domain). Not cryptographic; doesn't need to be — this
+// only needs to be REPRODUCIBLE from the same seed within one process, not secure or high-quality random.
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// FNV-1a — a small, fast, dependency-free string hash, just to turn a seed STRING into mulberry32's numeric
+// seed. Collision behavior doesn't matter here (worst case two different episodes share a shuffle order).
+function fnv1a(str: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+// Fisher–Yates using the seeded PRNG above — an in-place, uniform shuffle driven entirely by `seed`, so the
+// SAME seed always produces the SAME order.
+function seededShuffle<T>(items: T[], seed: string): T[] {
+  const rand = mulberry32(fnv1a(seed));
+  const out = items.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+// How long a shuffled failover ORDER stays stable for a given group before the next episode reshuffles it.
+// Wide enough that a single episode's attempt=1,2,3... calls (which land within the same walk, seconds
+// apart) always see the identical order — Rust calls this fresh per attempt with no state of its own, so
+// "the same order across attempts" has to come from somewhere deterministic, not from a shuffle-every-call
+// (which could hand attempt=2 a candidate attempt=1 already tried, or skip one entirely) — while still
+// short enough that the NEXT time this group needs to fail over, hours or days later, it's freshly
+// re-randomized rather than perpetually favoring whichever order the very first bucket happened to draw.
+const FAILOVER_SHUFFLE_BUCKET_MS = 5 * 60_000; // 5 min
+
 // The RESOLVE SEAM (control plane). Given a stream request the Rust data plane can't resolve itself, Node
 // runs the stateful, per-source adapter logic (dulo Supabase auth, dlhd 3-hop scrape + mirror rotation, the
 // SourceProxy bag) and returns a per-stream GRANT the sidecar replays for the whole stream. This keeps ALL
@@ -205,9 +254,12 @@ async function buildFailoverGrant(
     return { ok: false, status: 410, error: 'failover_exhausted' };
   }
 
-  // Candidates = the group's Active children in failover order. Disabled children are deliberately
-  // skipped (status is the operator's exclusion governor — a disabled backup must never be served).
-  const children = await PlaylistChannel.find(
+  // Candidates = the group's Active children, RANDOMIZED per failover episode (see seededShuffle above) —
+  // deliberately NOT failoverOrder every time: a repeatedly-failing primary would otherwise always retry the
+  // exact same next-in-list backup first, which does nothing useful when THAT one is also flaky/down for
+  // the same regional/upstream reason. Disabled children are still skipped outright (status is the
+  // operator's exclusion governor — a disabled backup must never be served, shuffled or not).
+  const rawChildren = await PlaylistChannel.find(
     {
       source: parent.source,
       failoverGroupId: parent.failoverGroupId,
@@ -216,8 +268,10 @@ async function buildFailoverGrant(
     },
     { _id: 0 },
   )
-    .sort({ failoverOrder: 1 })
+    .sort({ failoverOrder: 1 }) // base order only matters as the shuffle's stable input, not the walk order
     .lean<PlaylistChannelDoc[]>();
+  const bucket = Math.floor(Date.now() / FAILOVER_SHUFFLE_BUCKET_MS);
+  const children = seededShuffle(rawChildren, `${parent.failoverGroupId}:${bucket}`);
   const cand = children[attempt - 1];
   if (!cand) {
     // Every Active backup was tried and none established — the real terminal event. Issue-level (≥1): an
