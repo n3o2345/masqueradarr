@@ -19,6 +19,7 @@ import GroupConfigModal from '../components/GroupConfigModal.vue';
 import AssignAccessModal from '../components/AssignAccessModal.vue';
 import GetAccessModal from '../components/GetAccessModal.vue';
 import DeletePlaylistModal from '../components/DeletePlaylistModal.vue';
+import EpgGuideGrid from '../components/EpgGuideGrid.vue';
 import { PLAYLISTS, CUSTOM_PLAYLISTS, GROUPS_BY_PLAYLIST, playlistScheduleLabel, reloadCustomPlaylists, reloadPlaylists, reloadEpgSources, reloadChannels, reloadGroups, disbandFailoverGroup, disbandChannelLocal, deleteChannels as apiDeleteChannels, tagNames, type Playlist, type Channel, type CustomPlaylist, type FailoverGroupResult } from '../data';
 import { useToast } from '../composables/useToast';
 import { usePlaylistActions, hasLiveUpstream, isGlobalScope, syncRequestUrl } from '../composables/usePlaylistActions';
@@ -74,6 +75,11 @@ function onDeleted(): void {
 // playlist; both take :playlist and branch on its endpoint (shared Global union vs this playlist's custom group).
 const assignAccessOpen = ref(false);
 const getAccessOpen = ref(false);
+
+// Top-level screen tab: 'channels' (the existing table/grid channel manager) or 'guide' (a read-only live
+// TV-guide grid for this playlist's own channels — EpgGuideGrid, the same component EPGDetailScreen.vue
+// uses for an EPG source's linked channels, just handed this playlist's `channels` instead).
+const screenTab = ref<'channels' | 'guide'>('channels');
 
 const view = ref<'table' | 'grid'>('table');
 // State filter (orthogonal to the table/grid view): defaults to Active so a channel list always opens
@@ -833,7 +839,17 @@ async function doAppend() {
       </div>
     </div>
 
-    <div class="card flush pl-detail-sticky">
+    <!-- Screen tab — Channels (the existing table/grid manager) vs Guide (a read-only live TV-guide for
+         this playlist's own channels). A plain Segmented, not nested inside either tab's own card, so it
+         reads as a top-level view switch rather than another per-channel filter. -->
+    <div class="row" style="gap: 10px;">
+      <Segmented :value="screenTab" @change="(v) => screenTab = v as any" :options="[
+        { value: 'channels', label: 'Channels', icon: 'tv' },
+        { value: 'guide', label: 'Guide', icon: 'epg' },
+      ]" />
+    </div>
+
+    <div v-if="screenTab === 'channels'" class="card flush pl-detail-sticky">
       <div class="toolbar">
         <SearchInput :value="search" @change="(v) => search = v" placeholder="Search channels" />
         <div class="select">
@@ -1024,6 +1040,10 @@ async function doAppend() {
         </p>
       </div>
     </div>
+
+    <!-- Guide tab — this playlist's own channels, live TV-guide style (EpgGuideGrid owns its own
+         search/status-filter/timeline-vs-list state; it only needs the channel list). -->
+    <EpgGuideGrid v-else-if="screenTab === 'guide'" :channels="channels" />
 
     <!-- Create modal -->
     <div v-if="customAction === 'create'" class="modal-bg" @click="customAction = null">
