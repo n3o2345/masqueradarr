@@ -108,6 +108,16 @@ const pairCountdown = computed(() => {
 });
 
 // Mint a pairing code + bookmarklet, then poll fast until the user's browser hands the session back.
+//
+// IMPORTANT: `status.signedIn` is just `!!accessToken`, and a stale/expired session (status ===
+// 'reauth_required') still has its old accessToken sitting in the doc — refresh() only ever flips
+// `status`, it never clears the token. So `signedIn` is ALREADY true the moment you open this panel
+// from "Re-authentication needed". If the poll below matched on `signedIn` alone, it would declare
+// victory on its very first tick — before the bookmarklet ever ran — then the next background refresh
+// would re-read the real (still-broken) status and the panel would snap right back to "Re-authentication
+// needed". To actually detect a NEW sign-in we require status === 'active' AND the doc's `updatedAt`
+// to have moved past a baseline captured when pairing started (signIn() always writes a fresh updatedAt).
+let pairBaselineUpdatedAt: string | null = null;
 async function startPairing() {
   error.value = null;
   pairFound.value = false;
@@ -120,6 +130,10 @@ async function startPairing() {
     error.value = `Could not start pairing: ${(e as Error).message}`;
     return;
   }
+  // Baseline off a fresh status read (not whatever's stale in `status.value`) so a reauth_required
+  // session's leftover updatedAt can't be mistaken for a new one.
+  await refresh();
+  pairBaselineUpdatedAt = status.value?.updatedAt ?? null;
   if (pairPoll) clearInterval(pairPoll);
   pairPoll = setInterval(async () => {
     now.value = Date.now();
@@ -129,7 +143,9 @@ async function startPairing() {
       return;
     }
     await refresh();
-    if (status.value?.signedIn) {
+    const s = status.value;
+    const isFreshSignIn = !!s?.signedIn && s.status === 'active' && s.updatedAt !== pairBaselineUpdatedAt;
+    if (isFreshSignIn) {
       pairFound.value = true;
       bus.emit('tvapp:auth-changed', { source: 'dulo' });
       setTimeout(stopPairing, 1400); // let the success state show, then collapse to Connected
@@ -142,6 +158,7 @@ function stopPairing() {
     pairPoll = null;
   }
   pairing.value = null;
+  pairBaselineUpdatedAt = null;
 }
 async function copyText(t: string) {
   try {
